@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fable Fieldhouse — Basketball Simulator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=Spline+Sans+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <span class="live-dot"></span>
+  <span class="brand">FABLE FIELDHOUSE</span>
+  <span class="sub">LIVE SIMULATION</span>
+  <span class="matchup"><span id="nameA"></span> <em>vs</em> <span id="nameB"></span></span>
+</header>
+
+<div class="scorebug">
+  <div class="bug-team a">
+    <span class="chip" id="chipA"></span>
+    <span class="abbr" id="abbrA">---</span>
+    <span class="poss" id="possA">&#9654;</span>
+    <span class="score" id="scoreA">0</span>
+  </div>
+  <div class="bug-mid">
+    <div class="qtr" id="qtr">Q1</div>
+    <div class="gclock led" id="gclock">12:00</div>
+    <div class="sclock led" id="sclock">24</div>
+  </div>
+  <div class="bug-team b">
+    <span class="score" id="scoreB">0</span>
+    <span class="poss" id="possB">&#9664;</span>
+    <span class="abbr" id="abbrB">---</span>
+    <span class="chip" id="chipB"></span>
+  </div>
+</div>
+
+<main>
+  <section class="court-col">
+    <canvas id="court"></canvas>
+    <div class="controls">
+      <button id="btnPlay" class="ctl big">&#9208; PAUSE</button>
+      <div class="speeds">
+        <span class="lbl">SPEED</span>
+        <button class="ctl" data-speed="1">1&times;</button>
+        <button class="ctl" data-speed="2">2&times;</button>
+        <button class="ctl" data-speed="4">4&times;</button>
+        <button class="ctl" data-speed="8">8&times;</button>
+        <button class="ctl" data-speed="16">16&times;</button>
+      </div>
+      <button id="btnNew" class="ctl big alt">&#10227; NEW GAME</button>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <div class="tabs">
+      <button class="tab on" data-tab="feed">PLAY-BY-PLAY</button>
+      <button class="tab" data-tab="box">BOX SCORE</button>
+      <button class="tab" data-tab="edit">EDIT TEAMS</button>
+    </div>
+    <div id="feed" class="feed"></div>
+    <div id="box" class="box hidden"></div>
+    <div id="edit" class="edit hidden"></div>
+  </aside>
+</main>
+
+<script src="players.js"></script>
+<script src="engine.js"></script>
+<script src="ui.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
