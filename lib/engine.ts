@@ -7,13 +7,16 @@
    Ported from the original engine.js with logic preserved exactly.
    ============================================================ */
 import type {
+  DefScheme,
   GameConfig,
   GameOpts,
+  PlayCall,
   Player,
   PlayerConfig,
   Ratings,
   SimEvent,
   SimEventType,
+  Tactics,
   TeamRuntime,
   Vec,
 } from "./types";
@@ -151,6 +154,63 @@ const LINES: {
   ],
 };
 
+export type PassType =
+  | "chest"
+  | "bounce"
+  | "skip"
+  | "lob"
+  | "entry"
+  | "outlet"
+  | "hitAhead"
+  | "pocket"
+  | "kickout"
+  | "noLook";
+
+type PassLineFn = (p: string, c: string) => string;
+const PASS_LINES: Record<PassType, PassLineFn[]> = {
+  chest: [
+    (p, c) => `${p} swings it to ${c}`,
+    (p, c) => `${p} moves it along to ${c}`,
+    (p, c) => `${p} finds ${c} on the perimeter`,
+  ],
+  bounce: [
+    (p, c) => `${p} threads a bounce pass to ${c}`,
+    (p, c) => `${p} sneaks a bounce pass through to ${c}`,
+  ],
+  skip: [
+    (p, c) => `${p} whips a cross-court skip pass to ${c}`,
+    (p, c) => `${p} skips it over the defense to ${c}`,
+  ],
+  lob: [
+    (p, c) => `${p} floats a lob in to ${c}`,
+    (p, c) => `${p} tosses it over the top to ${c}`,
+  ],
+  entry: [
+    (p, c) => `${p} feeds ${c} on the block`,
+    (p, c) => `${p} drops it into ${c} inside`,
+  ],
+  outlet: [
+    (p, c) => `${p} fires the outlet to ${c}`,
+    (p, c) => `${p} kicks the outlet ahead to ${c}`,
+  ],
+  hitAhead: [
+    (p, c) => `${p} hits ${c} ahead of the pack`,
+    (p, c) => `${p} pushes it up the floor to ${c}`,
+  ],
+  pocket: [
+    (p, c) => `${p} slips a pocket pass to ${c} on the roll`,
+    (p, c) => `${p} drops it off to the rolling ${c}`,
+  ],
+  kickout: [
+    (p, c) => `${p} drives and kicks to ${c}`,
+    (p, c) => `${p} collapses the defense and sprays it to ${c}`,
+  ],
+  noLook: [
+    (p, c) => `${p} drops a no-look dime to ${c}`,
+    (p, c) => `${p} finds ${c} without even looking`,
+  ],
+};
+
 interface Flight {
   kind: "pass" | "shot" | "inbound";
   from: Vec;
@@ -159,8 +219,8 @@ interface Flight {
   dur: number;
   passer?: Player | null;
   catcher?: Player;
-  intercepted?: boolean;
   errant?: boolean;
+  passType?: PassType;
   // shot-only fields
   shooter?: Player;
   made?: boolean;
@@ -210,6 +270,17 @@ export class Game {
   claims!: Map<number, number>[];
   deadTimer = 0;
   inb!: { inbounder: Player; receiver: Player; spot: Vec };
+  tactics!: Tactics[];
+  /** play roles for the team currently on offense */
+  roles!: { handler: Player | null; screener: Player | null; focus: Player | null };
+  screen!: { timer: number; screener: Player; handler: Player } | null;
+  /** seconds of transition remaining after a live change of possession */
+  fastBreak = 0;
+  /** single-possession lab mode: which team's possession we're watching */
+  lab: { team: number } | null = null;
+  frozen = false;
+  /** inbound deferred by a lab freeze, replayed on resume */
+  labPending: { team: number; spot: Vec; sc: number } | null = null;
 
   constructor(cfg: GameConfig, opts: GameOpts = {}) {
     this.onEvent = opts.onEvent || (() => {});
@@ -239,6 +310,12 @@ export class Game {
     this.sinceCatch = 99;
     this.lastShotTeam = 0;
     this.claims = [new Map(), new Map()];
+    this.tactics = [
+      { play: "motion", defScheme: "man", focusSlot: null },
+      { play: "motion", defScheme: "man", focusSlot: null },
+    ];
+    this.roles = { handler: null, screener: null, focus: null };
+    this.screen = null;
     this.emit("period", `Tip-off! The ${this.teams[this.possession].name} start with the ball`, null);
     this.setupInbound(this.possession, this.baselineSpot(this.possession), { sc: 24 });
   }
@@ -252,7 +329,7 @@ export class Game {
       slot,
       id: team * 5 + slot,
       tend: Object.assign(
-        { shoot: 50, three: 50, drive: 50, pass: 50, help: 50, crash: 50, gamble: 50 },
+        { shoot: 50, three: 50, drive: 50, pass: 50, kickout: 50, help: 50, crash: 50, gamble: 50 },
         cfg.tendencies || {}
       ),
       pos: { x: 47 + rand(-15, 15), y: 25 + rand(-15, 15) },
@@ -264,6 +341,8 @@ export class Game {
       decisionTimer: rand(0.3, 0.6),
       spotIdx: -1,
       spotTimer: 0,
+      rollTimer: 0,
+      zoneIdx: -1,
       stats: { pts: 0, fgm: 0, fga: 0, tpm: 0, tpa: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0 },
     } as Player;
   }
@@ -391,7 +470,7 @@ export class Game {
 
   /* ---------- main loop ---------- */
   step(dt: number) {
-    if (this.over) return;
+    if (this.over || this.frozen) return;
     if (this.phase === "setup") {
       this.updateDefense();
       this.moveAll(dt);
@@ -412,6 +491,11 @@ export class Game {
       }
     }
     this.sinceCatch += dt;
+    this.fastBreak = Math.max(0, this.fastBreak - dt);
+    if (this.screen) {
+      this.screen.timer -= dt;
+      if (this.screen.timer <= 0) this.screen = null;
+    }
     this.updateOffense(dt);
     this.updateDefense();
     if (this.ball.loose) this.updateLoose(dt);
@@ -498,29 +582,126 @@ export class Game {
   /* ---------- off-ball offense ---------- */
   updateOffense(dt: number) {
     if (this.ball.loose) return;
+    if (this.fastBreak > 0) {
+      this.transitionOffense();
+      return;
+    }
+    const play = this.tactics[this.possession].play;
+    const holder = this.ball.holder;
     for (const p of this.teams[this.possession].players) {
-      if (p === this.ball.holder) continue;
+      if (p === holder) continue;
       if (this.ball.flight && this.ball.flight.catcher === p) {
         p.moveTarget = { ...this.ball.flight.to };
         continue;
       }
+      if (p.rollTimer > 0) {
+        // screener rolling hard to the rim
+        p.rollTimer -= dt;
+        const hoop = this.hoops[p.team];
+        const side = p.pos.y >= COURT.H / 2 ? 1 : -1;
+        p.moveTarget = this.spotPos(p.team, { ax: 3, ay: side * 4, cat: "inside" });
+        continue;
+      }
+      if (this.playTarget(p, play, holder)) continue;
       p.spotTimer -= dt;
-      if (p.spotIdx < 0 || p.spotTimer <= 0) this.assignSpot(p);
+      if (p.spotIdx < 0 || p.spotTimer <= 0) this.assignSpot(p, play);
       p.moveTarget = this.spotPos(p.team, SPOTS[p.spotIdx]);
+    }
+    this.updateScreen(play, holder);
+  }
+
+  /** Play-specific off-ball assignment. Returns true if it set a target. */
+  playTarget(p: Player, play: PlayCall, holder: Player | null): boolean {
+    const { focus, screener } = this.roles;
+    if (play === "iso" && p === focus) {
+      // the iso man posts up at the top of the key waiting for the ball
+      p.moveTarget = this.spotPos(p.team, { ax: 24.5, ay: 0, cat: "three" });
+      return true;
+    }
+    if (play === "post" && p === focus) {
+      const side = p.pos.y >= COURT.H / 2 ? 1 : -1;
+      p.moveTarget = this.spotPos(p.team, { ax: 4.5, ay: side * 5.5, cat: "inside" });
+      return true;
+    }
+    if (play === "pnr" && p === screener && holder === this.roles.handler && holder) {
+      if (this.inFrontcourt(holder.pos, holder.team) && !holder.driving && !this.screen) {
+        // come set the screen right next to the handler
+        const hoop = this.hoops[p.team];
+        const ux = (hoop.x - holder.pos.x) / (dist(holder.pos, hoop) || 1);
+        p.moveTarget = { x: holder.pos.x + ux * 1.5, y: holder.pos.y + (p.pos.y >= holder.pos.y ? 2 : -2) };
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Trigger the pick-and-roll once the screener arrives at the ball. */
+  updateScreen(play: PlayCall, holder: Player | null) {
+    if (play !== "pnr" || this.screen) return;
+    const { handler, screener } = this.roles;
+    if (!handler || !screener || holder !== handler) return;
+    if (!this.inFrontcourt(handler.pos, handler.team) || handler.driving) return;
+    if (dist(screener.pos, handler.pos) < 3.2 && screener.rollTimer <= 0) {
+      this.screen = { timer: 1.0, screener, handler };
+      screener.rollTimer = 2.4;
+      handler.driving = true;
+      handler.driveSide = handler.pos.y >= screener.pos.y ? 1 : -1; // attack off the pick
     }
   }
 
-  assignSpot(p: Player) {
+  /** Fill the lanes: rim runner, two corner sprinters, a trailer. */
+  transitionOffense() {
+    const hoop = this.hoops[this.possession];
+    const holder = this.ball.holder;
+    const runners = this.teams[this.possession].players.filter((p) => {
+      if (p === holder) return false;
+      if (this.ball.flight && this.ball.flight.catcher === p) {
+        p.moveTarget = { ...this.ball.flight.to };
+        return false;
+      }
+      return true;
+    });
+    runners.sort((a, b) => dist(a.pos, hoop) - dist(b.pos, hoop));
+    const lanes: Spot[] = [
+      { ax: 3, ay: 0, cat: "inside" }, // rim run
+      { ax: 2, ay: -19, cat: "three" }, // corners
+      { ax: 2, ay: 19, cat: "three" },
+      { ax: 24.5, ay: 0, cat: "three" }, // trailer
+    ];
+    const taken = new Set<number>();
+    for (const p of runners) {
+      let best = -1,
+        bd = Infinity;
+      for (let i = 0; i < lanes.length; i++) {
+        if (taken.has(i)) continue;
+        const d = dist(p.pos, this.spotPos(p.team, lanes[i]));
+        if (d < bd) {
+          bd = d;
+          best = i;
+        }
+      }
+      if (best < 0) continue; // more runners than lanes (ball in flight)
+      taken.add(best);
+      p.moveTarget = this.spotPos(p.team, lanes[best]);
+    }
+  }
+
+  assignSpot(p: Player, play: PlayCall = "motion") {
     const claims = this.claims[p.team];
     claims.delete(p.id);
     const taken = new Set(claims.values());
-    const tf = (t: number) => 0.3 + t * 0.014; // tendency factor: 50 -> 1.0
-    const w3 = Math.pow(p.threePoint, 2.2) * tf(p.tend.three);
-    const wm = Math.pow(p.midRange, 2.2);
-    const wi = Math.pow((p.layup + p.dunk) / 2, 2.2) * tf(p.tend.drive);
-    const total = w3 + wm + wi;
-    const r = Math.random() * total;
-    const cat = r < w3 ? "three" : r < w3 + wm ? "mid" : "inside";
+    let cat: Spot["cat"];
+    if (play !== "motion") {
+      cat = "three"; // iso/pnr/post: everyone else spaces to the arc
+    } else {
+      const tf = (t: number) => 0.3 + t * 0.014; // tendency factor: 50 -> 1.0
+      const w3 = Math.pow(p.threePoint, 2.2) * tf(p.tend.three);
+      const wm = Math.pow(p.midRange, 2.2);
+      const wi = Math.pow((p.layup + p.dunk) / 2, 2.2) * tf(p.tend.drive);
+      const total = w3 + wm + wi;
+      const r = Math.random() * total;
+      cat = r < w3 ? "three" : r < w3 + wm ? "mid" : "inside";
+    }
     let cands = SPOTS.map((s, i) => i).filter((i) => SPOTS[i].cat === cat && !taken.has(i));
     if (!cands.length) cands = SPOTS.map((s, i) => i).filter((i) => !taken.has(i));
     p.spotIdx = pick(cands);
@@ -534,11 +715,31 @@ export class Game {
     const defTeam = 1 - this.possession;
     const hoop = this.hoops[this.possession]; // the hoop being attacked
     const f = this.ball.flight;
-    for (const p of this.teams[defTeam].players) {
-      if (f && f.intercepted && f.catcher === p) {
-        p.moveTarget = { ...f.to };
-        continue;
+    const scheme = this.tactics[defTeam].defScheme;
+    // react to a live pass: defenders near the remaining flight path
+    // lunge into the lane for the pick or deflection
+    const lunged = new Set<Player>();
+    if (f && f.kind === "pass" && !f.errant) {
+      for (const p of this.teams[defTeam].players) {
+        const pr = projectOnSeg(p.pos, this.ball.pos, f.to);
+        // jump the lane only where the pick is live (not at the catch point)
+        if (pr.d < 3.0 && dist(pr.pt, f.to) > 4.0) {
+          p.moveTarget = pr.pt;
+          lunged.add(p);
+        }
       }
+    }
+    if (this.fastBreak > 0) {
+      this.transitionDefense(defTeam, lunged);
+      return;
+    }
+    if (scheme === "zone") {
+      this.zoneDefense(defTeam, lunged);
+      return;
+    }
+    if (scheme === "switch") this.trySwitches(defTeam);
+    for (const p of this.teams[defTeam].players) {
+      if (lunged.has(p)) continue;
       const mark = this.teams[this.possession].players.find((q) => q.slot === p.markSlot)!;
       const onBall = mark === this.ball.holder;
       const dm = dist(mark.pos, hoop);
@@ -583,6 +784,131 @@ export class Game {
     }
   }
 
+  /** Scramble defense while the break is on: deepest man protects the
+      rim, everyone else picks up the nearest unclaimed attacker. */
+  transitionDefense(defTeam: number, lunged: Set<Player>) {
+    const hoop = this.hoops[this.possession];
+    const offs = this.teams[this.possession].players;
+    const defs = this.teams[defTeam].players
+      .slice()
+      .sort((a, b) => dist(a.pos, hoop) - dist(b.pos, hoop));
+    const ballPos = this.ball.pos;
+    const claimed = new Set<Player>();
+    defs.forEach((p, i) => {
+      if (lunged.has(p)) return;
+      if (i === 0) {
+        // build the wall: sit between the rim and the ball
+        const ux = (ballPos.x - hoop.x) / (dist(ballPos, hoop) || 1);
+        const uy = (ballPos.y - hoop.y) / (dist(ballPos, hoop) || 1);
+        const depth = Math.min(9, dist(ballPos, hoop) * 0.5);
+        p.moveTarget = { x: hoop.x + ux * depth, y: hoop.y + uy * depth };
+        return;
+      }
+      let near: Player | null = null,
+        nd = Infinity;
+      for (const o of offs) {
+        if (claimed.has(o)) continue;
+        const d = dist(p.pos, o.pos);
+        if (d < nd) {
+          nd = d;
+          near = o;
+        }
+      }
+      if (!near) return;
+      claimed.add(near);
+      // pick him up goal-side
+      const ux = (hoop.x - near.pos.x) / (dist(near.pos, hoop) || 1);
+      const uy = (hoop.y - near.pos.y) / (dist(near.pos, hoop) || 1);
+      p.moveTarget = { x: near.pos.x + ux * 1.8, y: near.pos.y + uy * 1.8 };
+    });
+  }
+
+  /** 2-3 zone: hold your area, shade toward the ball, nearest man
+      closes out on the handler. */
+  zoneDefense(defTeam: number, lunged: Set<Player>) {
+    const anchors: Spot[] = [
+      { ax: 15, ay: -7, cat: "mid" }, // top guards
+      { ax: 15, ay: 7, cat: "mid" },
+      { ax: 8, ay: -14, cat: "mid" }, // baseline wings
+      { ax: 8, ay: 14, cat: "mid" },
+      { ax: 4.5, ay: 0, cat: "inside" }, // middle
+    ];
+    const defs = this.teams[defTeam].players;
+    if (defs.some((p) => p.zoneIdx < 0)) this.assignZones(defTeam);
+    const bp = this.ball.pos;
+    const holder = this.ball.holder;
+    const ballInFront = this.inFrontcourt(bp, this.possession);
+    // the defender whose anchor is closest to the ball closes out
+    let closer: Player | null = null;
+    if (holder && ballInFront) {
+      let bd = Infinity;
+      for (const p of defs) {
+        const a = this.spotPos(this.possession, anchors[p.zoneIdx]);
+        const d = dist(a, bp);
+        if (d < bd) {
+          bd = d;
+          closer = p;
+        }
+      }
+    }
+    for (const p of defs) {
+      if (lunged.has(p)) continue;
+      const a = this.spotPos(this.possession, anchors[p.zoneIdx]);
+      if (p === closer && holder) {
+        const hoop = this.hoops[this.possession];
+        const ux = (hoop.x - holder.pos.x) / (dist(holder.pos, hoop) || 1);
+        const uy = (hoop.y - holder.pos.y) / (dist(holder.pos, hoop) || 1);
+        p.moveTarget = { x: holder.pos.x + ux * 1.8, y: holder.pos.y + uy * 1.8 };
+        continue;
+      }
+      const shade = ballInFront ? 0.3 : 0;
+      p.moveTarget = {
+        x: a.x + clamp((bp.x - a.x) * shade, -6, 6),
+        y: a.y + clamp((bp.y - a.y) * shade, -6, 6),
+      };
+    }
+  }
+
+  /** Tallest players anchor the back line, quickest take the top. */
+  assignZones(defTeam: number) {
+    const defs = this.teams[defTeam].players.slice();
+    defs.sort((a, b) => b.heightIn - a.heightIn);
+    defs[0].zoneIdx = 4; // middle
+    const rest = defs.slice(1);
+    rest.sort((a, b) => b.perimeterD + b.speed - (a.perimeterD + a.speed));
+    // two quickest up top, the other two on the baseline wings
+    const tops = rest.slice(0, 2).sort((a, b) => a.pos.y - b.pos.y);
+    tops[0].zoneIdx = 0;
+    tops[1].zoneIdx = 1;
+    const lows = rest.slice(2).sort((a, b) => a.pos.y - b.pos.y);
+    lows[0].zoneIdx = 2;
+    lows[1].zoneIdx = 3;
+  }
+
+  /** Switching scheme: when two marks cross or screen for each other
+      and trading assignments shortens both closeouts, swap them. */
+  trySwitches(defTeam: number) {
+    const defs = this.teams[defTeam].players;
+    const offs = this.teams[this.possession].players;
+    const markOf = (d: Player) => offs.find((q) => q.slot === d.markSlot)!;
+    for (let i = 0; i < defs.length; i++) {
+      for (let j = i + 1; j < defs.length; j++) {
+        const a = defs[i],
+          b = defs[j];
+        const ma = markOf(a),
+          mb = markOf(b);
+        if (dist(ma.pos, mb.pos) > 7) continue; // only on screens / crossing action
+        const cur = dist(a.pos, ma.pos) + dist(b.pos, mb.pos);
+        const swp = dist(a.pos, mb.pos) + dist(b.pos, ma.pos);
+        if (swp + 1.5 < cur) {
+          const tmp = a.markSlot;
+          a.markSlot = b.markSlot;
+          b.markSlot = tmp;
+        }
+      }
+    }
+  }
+
   /* ---------- ball handler AI ---------- */
   updateHandler(dt: number) {
     const h = this.ball.holder!;
@@ -600,14 +926,31 @@ export class Game {
         near.p.stats.stl++;
         h.stats.tov++;
         this.emit("steal", pick(LINES.steal)(near.p.name, h.name), near.p.team);
-        this.gainPossession(near.p);
+        this.gainPossession(near.p, { live: true });
         return;
       }
     }
     if (h.driving) {
       const hoop = this.hoops[h.team];
       h.moveTarget = { x: hoop.x, y: hoop.y + h.driveSide * 1.5 };
-      if (dist(h.pos, hoop) < 4.2) {
+      const dHoop = dist(h.pos, hoop);
+      // drive-and-kick: if the help collapses on the way down, spray
+      // it out to an open shooter on the arc
+      if (dHoop > 5 && dHoop < 18 && this.shotClock > 2.5) {
+        const kick = this.kickoutTarget(h);
+        if (kick) {
+          const pressure = near.d < 3.5 || this.laneBlockers(h) >= 2;
+          const rate =
+            (0.45 + h.iq * 0.009) *
+            clamp(0.15 + (h.tend.kickout - 30) * 0.012, 0.05, 1.1) *
+            (pressure ? 2.2 : 0.5);
+          if (Math.random() < rate * dt) {
+            this.tryPass(h, kick, "kickout");
+            return;
+          }
+        }
+      }
+      if (dHoop < 4.2) {
         this.attemptShot(h, false);
         return;
       }
@@ -627,23 +970,59 @@ export class Game {
       return;
     }
 
+    const breaking = this.fastBreak > 0;
     if (!this.inFrontcourt(h.pos, h.team)) {
-      // bring the ball up
+      // bring the ball up — push harder on the break
       const dir = hoop.x > COURT.W / 2 ? -1 : 1;
       h.moveTarget = {
-        x: hoop.x + dir * 25,
+        x: hoop.x + dir * (breaking ? 8 : 25),
         y: clamp(COURT.H / 2 + (h.pos.y - COURT.H / 2) * 0.4, 10, 40),
       };
+      const minGap = breaking ? 6 : 7;
+      const minAhead = breaking ? 8 : 10;
       const ahead = this.mates(h).filter(
         (m) =>
           this.inFrontcourt(m.pos, h.team) &&
-          this.openness(m) > 7 &&
-          dist(m.pos, hoop) < dist(h.pos, hoop) - 10
+          this.openness(m) > minGap &&
+          dist(m.pos, hoop) < dist(h.pos, hoop) - minAhead &&
+          this.passRisk(h, m.pos) < 0.55
       );
-      if (ahead.length && Math.random() < 0.3 + h.iq * 0.004) {
+      const eager = breaking ? 0.5 + h.iq * 0.005 : 0.3 + h.iq * 0.004;
+      if (ahead.length && Math.random() < eager) {
         ahead.sort((a, b) => dist(a.pos, hoop) - dist(b.pos, hoop));
         this.tryPass(h, ahead[0]);
       }
+      return;
+    }
+
+    const play = this.tactics[h.team].play;
+    const { focus, screener } = this.roles;
+    // get the play its touch: feed the iso man / post man when he's in position
+    if (play === "iso" && focus && h !== focus && sc > 6) {
+      if (
+        this.inFrontcourt(focus.pos, h.team) &&
+        this.openness(focus) > 3.5 &&
+        this.passRisk(h, focus.pos) < 0.6
+      ) {
+        this.tryPass(h, focus);
+        return;
+      }
+    }
+    if (play === "post" && focus && h !== focus && sc > 5) {
+      const blockSpot = this.spotPos(h.team, {
+        ax: 4.5,
+        ay: focus.pos.y >= COURT.H / 2 ? 5.5 : -5.5,
+        cat: "inside",
+      });
+      if (dist(focus.pos, blockSpot) < 4 && this.passRisk(h, focus.pos) < 0.5) {
+        this.tryPass(h, focus);
+        return;
+      }
+    }
+    // post man backs his defender down once he has it deep
+    if (play === "post" && h === focus && dist(h.pos, hoop) < 13 && !h.driving) {
+      h.driving = true;
+      h.driveSide = h.pos.y >= COURT.H / 2 ? 1 : -1;
       return;
     }
 
@@ -658,6 +1037,13 @@ export class Game {
       let v = sv.value * 0.95 + clamp(this.openness(m), 0, 10) * 0.012;
       // spread the ball: discount feeding someone who's already eaten
       v *= 1 - clamp((m.stats.fga - avgFga) * 0.012, -0.08, 0.3);
+      // don't throw into traffic: discount targets with a hot lane,
+      // and write off lanes that are flat-out covered
+      const risk = this.passRisk(h, m.pos);
+      if (risk > 0.65) continue;
+      v *= 1 - risk * 0.6;
+      // the roller is a live target out of the pick-and-roll
+      if (play === "pnr" && m === screener && m.rollTimer > 0) v += 0.3;
       if (v > bestVal) {
         bestVal = v;
         best = m;
@@ -686,20 +1072,40 @@ export class Game {
     }
     if (lateGame && margin < 0) need *= margin <= -9 ? 0.7 : 0.85; // trailing: hurry
     if (lateGame && margin > 0 && gc < 60) need *= 1.3; // leading: slow it down
+    if (breaking) need *= 0.8; // transition looks are good looks
+    // the play's star hunts his shot
+    if ((play === "iso" || play === "post") && h === focus) need *= 0.92;
+
+    // numbers on the break: attack the rim before the defense loads up
+    if (breaking && !h.driving) {
+      const defBack = this.teams[1 - h.team].players.filter(
+        (o) => dist(o.pos, hoop) < dist(h.pos, hoop)
+      ).length;
+      const usAhead =
+        this.mates(h).filter((m) => dist(m.pos, hoop) < dist(h.pos, hoop)).length + 1;
+      if (defBack < usAhead && Math.random() < 0.5 + h.speed * 0.004) {
+        h.driving = true;
+        h.driveSide = Math.random() < 0.5 ? -1 : 1;
+        return;
+      }
+    }
 
     if (my.value + rand(-noise, noise) >= need) {
       this.attemptShot(h, false);
       return;
     }
-    const driveGate = clamp(0.6 + (h.tend.drive - 50) * 0.008, 0.15, 0.95);
+    let driveGate = clamp(0.6 + (h.tend.drive - 50) * 0.008, 0.15, 0.95);
+    if ((play === "iso" || play === "post") && h === focus) driveGate = Math.min(0.95, driveGate + 0.25);
     if (!h.driving && Math.random() < driveGate && dv + rand(-noise, noise) >= need * 0.9) {
       h.driving = true;
       h.driveSide = Math.random() < 0.5 ? -1 : 1;
       return;
     }
     if (best && sc > 2.5) {
-      const passBias =
+      let passBias =
         (bestVal > my.value + 0.03 ? 0.75 : 0.3) * clamp(0.5 + h.tend.pass * 0.01, 0.4, 1.5);
+      // the star holds the ball more in iso/post sets
+      if ((play === "iso" || play === "post") && h === focus) passBias *= 0.45;
       if (Math.random() < passBias) {
         this.tryPass(h, best);
         return;
@@ -757,15 +1163,62 @@ export class Game {
     return { prob, type, d, pts, value: prob * pts, defD: no.d, defender: no.p };
   }
 
-  driveValue(h: Player) {
+  laneBlockers(h: Player) {
     const hoop = this.hoops[h.team];
-    const d = dist(h.pos, hoop);
-    if (d < 7) return 0;
     let blockers = 0;
     for (const o of this.teams[1 - h.team].players) {
       const pr = projectOnSeg(o.pos, h.pos, hoop);
       if (pr.t > 0.1 && pr.t < 0.95 && pr.d < 4.0) blockers++;
     }
+    return blockers;
+  }
+
+  /** Best open three-point shooter to kick out to, if any. */
+  kickoutTarget(h: Player): Player | null {
+    let best: Player | null = null,
+      bv = 0;
+    for (const m of this.mates(h)) {
+      if (!this.inFrontcourt(m.pos, h.team)) continue;
+      const sv = this.shotValue(m, m.pos);
+      if (sv.type !== "three") continue;
+      const open = this.openness(m);
+      if (open < 5) continue;
+      if (this.passRisk(h, m.pos) > 0.55) continue;
+      const v = sv.prob + clamp(open - 5, 0, 8) * 0.012;
+      if (v > bv) {
+        bv = v;
+        best = m;
+      }
+    }
+    // only kick to someone who can actually shoot it
+    return best && bv > 0.32 ? best : null;
+  }
+
+  /** 0..1: how likely a pass from h to `to` is to be picked off,
+      given defenders' ability to close on the lane while the ball
+      is in the air. Used by the AI to avoid risky passes. */
+  passRisk(h: Player, to: Vec) {
+    const from = h.pos;
+    const d = dist(from, to);
+    let risk = 0;
+    for (const o of this.teams[1 - h.team].players) {
+      const pr = projectOnSeg(o.pos, from, to);
+      if (pr.t < 0.08 || pr.t > 0.92) continue;
+      const tAt = (pr.t * d) / 40; // seconds until the ball is there
+      const reach = 1.6 + maxSpeedOf(o) * tAt * 0.55;
+      if (pr.d >= reach) continue;
+      const r =
+        (1 - pr.d / reach) * (0.55 + (o.steal - 50) * 0.008 + o.tend.gamble * 0.002);
+      if (r > risk) risk = r;
+    }
+    return clamp(risk, 0, 1);
+  }
+
+  driveValue(h: Player) {
+    const hoop = this.hoops[h.team];
+    const d = dist(h.pos, hoop);
+    if (d < 7) return 0;
+    const blockers = this.laneBlockers(h);
     const press = this.nearestOppTo(h.team, h.pos).d < 2.5 ? 0.08 : 0;
     const fin =
       0.42 +
@@ -778,38 +1231,50 @@ export class Game {
   }
 
   /* ---------- passing ---------- */
-  tryPass(h: Player, m: Player) {
+  /** Pick a descriptive pass type from the geometry and game context. */
+  classifyPass(h: Player, m: Player, from: Vec, to: Vec): PassType {
+    const hoop = this.hoops[h.team];
+    const d = dist(from, to);
+    const forward = dist(from, hoop) - dist(to, hoop);
+    if (this.fastBreak > 0 && forward > 14) {
+      return this.inFrontcourt(from, h.team) ? "hitAhead" : "outlet";
+    }
+    if (m === this.roles.screener && m.rollTimer > 0) return "pocket";
+    if (dist(to, hoop) < 9 && d > 14) {
+      // entry feed: lob it over the top if the defender is fronting
+      const md = this.nearestOppTo(h.team, m.pos);
+      const fronting = md.d < 3 && dist(md.p.pos, from) < dist(m.pos, from);
+      return fronting ? "lob" : "entry";
+    }
+    if (Math.abs(from.y - to.y) > 22 && d > 25) return "skip";
+    // a defender tight to the lane forces it low
+    for (const o of this.teams[1 - h.team].players) {
+      const pr = projectOnSeg(o.pos, from, to);
+      if (pr.t > 0.12 && pr.t < 0.88 && pr.d < 3.2) return "bounce";
+    }
+    if (h.passAcc > 78 && Math.random() < 0.1) return "noLook";
+    return "chest";
+  }
+
+  tryPass(h: Player, m: Player, forceType?: PassType) {
     h.driving = false;
     const from = { x: h.pos.x, y: h.pos.y };
     const to = { x: m.pos.x + rand(-0.5, 0.5), y: m.pos.y + rand(-0.5, 0.5) };
     const d = dist(from, to);
-    let interceptor: Player | null = null,
-      bestRisk = 0,
-      ipt: Vec | null = null;
-    for (const o of this.teams[1 - h.team].players) {
-      const pr = projectOnSeg(o.pos, from, to);
-      if (pr.t > 0.12 && pr.t < 0.88 && pr.d < 3.0) {
-        const r = (3.0 - pr.d) * (0.4 + (o.steal - 40) / 120) * (0.7 + o.tend.gamble * 0.006);
-        if (r > bestRisk) {
-          bestRisk = r;
-          interceptor = o;
-          ipt = pr.pt;
-        }
-      }
-    }
+    const passType = forceType || this.classifyPass(h, m, from, to);
     const pf = (105 - h.passAcc) / 100; // sloppy passers risk more
-    const stealP = interceptor ? clamp(bestRisk * 0.025 * (0.7 + pf), 0, 0.1) : 0;
     const press = this.nearestOppTo(h.team, h.pos).d;
     const errP = clamp(
-      0.003 + pf * 0.012 + (press < 2.2 ? 0.012 : 0) + (d > 32 ? 0.02 : 0),
+      0.003 +
+        pf * 0.012 +
+        (press < 2.2 ? 0.012 : 0) +
+        (d > 32 ? 0.02 : 0) +
+        (passType === "noLook" ? 0.012 : 0),
       0,
-      0.05
+      0.06
     );
-    const roll = Math.random();
     let flight: Flight;
-    if (roll < stealP) {
-      flight = { kind: "pass", from, to: ipt!, catcher: interceptor!, intercepted: true } as Flight;
-    } else if (roll < stealP + errP) {
+    if (Math.random() < errP) {
       const ux = (to.x - from.x) / (d || 1),
         uy = (to.y - from.y) / (d || 1);
       const over = rand(3, 7);
@@ -823,8 +1288,13 @@ export class Game {
       flight = { kind: "pass", from, to, catcher: m } as Flight;
     }
     flight.passer = h;
+    flight.passType = passType;
     flight.t = 0;
     flight.dur = 0.18 + dist(from, flight.to) / 42;
+    // bounce passes and lobs hang longer; transition lasers zip
+    if (passType === "bounce" || passType === "lob") flight.dur *= 1.18;
+    if (passType === "outlet" || passType === "hitAhead" || passType === "skip")
+      flight.dur *= 0.88;
     this.ball.flight = flight;
     this.ball.holder = null;
   }
@@ -836,11 +1306,74 @@ export class Game {
     const k = Math.min(1, f.t / f.dur);
     this.ball.pos = { x: lerp(f.from.x, f.to.x, k), y: lerp(f.from.y, f.to.y, k) };
     this.ball.air = Math.sin(Math.PI * k) * (f.kind === "shot" ? 1 : 0.25);
+    if (f.kind === "pass" && this.checkInterception(f, k, dt)) return;
     if (f.t < f.dur) return;
     this.ball.flight = null;
     this.ball.air = 0;
     if (f.kind === "shot") this.resolveShot(f);
     else this.resolvePass(f);
+  }
+
+  /** A pass in the air is live: any defender who gets to the ball can
+      pick it clean or knock it loose. Resolved continuously so a body
+      sitting in the lane of a lazy cross-court pass actually matters. */
+  checkInterception(f: Flight, k: number, dt: number): boolean {
+    // only the middle of the flight is live: at the ends the ball is
+    // protected by the passer's release and the catcher's body
+    if (dist(this.ball.pos, f.from) < 3.5 || dist(this.ball.pos, f.to) < 4.0) return false;
+    const passer = f.passer!;
+    const passLen = dist(f.from, f.to);
+    const ballSpeed = passLen / f.dur;
+    // a lob over the top floats above outstretched hands mid-flight
+    const high = f.passType === "lob" && k > 0.25 && k < 0.8;
+    if (high) return false;
+    // short zip passes are nearly impossible to react to; long lazy
+    // cross-court balls hang in the air asking to be taken
+    const lazy = clamp((passLen - 12) / 25, 0.12, 1);
+    for (const o of this.teams[1 - passer.team].players) {
+      const d = dist(o.pos, this.ball.pos);
+      if (d > 2.4) continue;
+      if (d < 1.9) {
+        const pickRate = clamp(
+          (3.4 + (o.steal - 50) * 0.07 + o.tend.gamble * 0.012 - ballSpeed * 0.03) *
+            (f.passType === "bounce" ? 0.7 : 1) *
+            lazy,
+          0.1,
+          8
+        );
+        if (Math.random() < pickRate * dt) {
+          o.stats.stl++;
+          passer.stats.tov++;
+          this.emit(
+            "steal",
+            `${o.name} jumps the passing lane — stolen from ${passer.name}!`,
+            o.team
+          );
+          this.ball.flight = null;
+          this.ball.air = 0;
+          this.gainPossession(o, { live: true });
+          return true;
+        }
+      }
+      // got a hand on it: deflection sends it bouncing free
+      const deflRate = clamp(1.2 + (o.steal - 50) * 0.025, 0.2, 3) * lazy;
+      if (Math.random() < deflRate * dt) {
+        this.emit("loose", `${o.name} gets a hand on the pass — deflected!`, o.team);
+        const ang = Math.atan2(this.ball.pos.y - o.pos.y, this.ball.pos.x - o.pos.x) + rand(-1.2, 1.2);
+        const v = rand(8, 16);
+        this.ball.flight = null;
+        this.ball.air = 0;
+        this.ball.loose = {
+          pos: { x: this.ball.pos.x, y: this.ball.pos.y },
+          vel: { x: Math.cos(ang) * v, y: Math.sin(ang) * v },
+          timer: rand(0.4, 0.8),
+          isRebound: false,
+          touchTeam: o.team,
+        };
+        return true;
+      }
+    }
+    return false;
   }
 
   resolvePass(f: Flight) {
@@ -869,18 +1402,6 @@ export class Game {
       }
       return;
     }
-    if (f.intercepted) {
-      const s = f.catcher!;
-      s.stats.stl++;
-      f.passer!.stats.tov++;
-      this.emit(
-        "steal",
-        `${s.name} jumps the passing lane — stolen from ${f.passer!.name}!`,
-        s.team
-      );
-      this.gainPossession(s);
-      return;
-    }
     this.ball.holder = f.catcher!;
     f.catcher!.allowOOB = false;
     f.catcher!.decisionTimer = rand(0.25, 0.6);
@@ -889,6 +1410,9 @@ export class Game {
     if (f.kind === "inbound") {
       this.shotClockActive = true;
       if (f.passer) f.passer.allowOOB = false;
+    } else if (f.passer) {
+      const line = pick(PASS_LINES[f.passType || "chest"])(f.passer.name, f.catcher!.name);
+      this.emit("pass", line, f.passer.team);
     }
   }
 
@@ -1088,14 +1612,15 @@ export class Game {
     } else {
       this.emit("recover", `${win!.name} comes up with the loose ball`, win!.team);
     }
-    this.gainPossession(win!);
+    this.gainPossession(win!, { live: true });
     if (offBoard) this.shotClock = 14;
     // recovering your own blocked shot / errant pass doesn't reset the clock
     if (samePoss) this.shotClock = Math.max(1, scBefore);
   }
 
   /* ---------- possession / dead balls ---------- */
-  gainPossession(p: Player) {
+  gainPossession(p: Player, opts: { live?: boolean } = {}) {
+    const changed = p.team !== this.possession;
     this.possession = p.team;
     this.ball.holder = p;
     this.ball.flight = null;
@@ -1110,9 +1635,56 @@ export class Game {
         q.driving = false;
         q.spotIdx = -1;
         q.spotTimer = 0;
+        q.rollTimer = 0;
+        q.zoneIdx = -1;
       }
     }
     this.claims = [new Map(), new Map()];
+    this.screen = null;
+    // a live change of possession ignites the break
+    if (opts.live && changed) this.fastBreak = 6;
+    else if (changed) this.fastBreak = 0;
+    this.setRoles(p.team);
+    if (this.lab && changed && p.team !== this.lab.team) this.labEnd();
+  }
+
+  /** Choose who runs the called play for the team now on offense. */
+  setRoles(team: number) {
+    const ps = this.teams[team].players;
+    const t = this.tactics[team];
+    const focusPick = t.focusSlot != null ? ps[t.focusSlot] : null;
+    const handler = ps
+      .slice()
+      .sort(
+        (a, b) =>
+          b.ballHandle * 0.6 + b.iq * 0.2 + b.speed * 0.2 -
+          (a.ballHandle * 0.6 + a.iq * 0.2 + a.speed * 0.2)
+      )[0];
+    let screener: Player | null = null;
+    let focus: Player | null = focusPick;
+    if (t.play === "pnr") {
+      screener =
+        focusPick && focusPick !== handler
+          ? focusPick
+          : ps
+              .filter((p) => p !== handler)
+              .sort(
+                (a, b) =>
+                  b.heightIn * 1.5 + b.strength * 0.5 - (a.heightIn * 1.5 + a.strength * 0.5)
+              )[0];
+      focus = null;
+    } else if (t.play === "iso" && !focus) {
+      focus = ps.slice().sort((a, b) => offThreat(b) - offThreat(a))[0];
+    } else if (t.play === "post" && !focus) {
+      focus = ps
+        .slice()
+        .sort(
+          (a, b) =>
+            b.heightIn * 2 + b.strength * 0.5 + b.layup * 0.4 -
+            (a.heightIn * 2 + a.strength * 0.5 + a.layup * 0.4)
+        )[0];
+    }
+    this.roles = { handler, screener, focus };
   }
 
   shotClockViolation() {
@@ -1123,6 +1695,11 @@ export class Game {
   }
 
   setupInbound(team: number, spot: Vec, opts: { sc: number }) {
+    if (this.lab && team !== this.lab.team) {
+      this.labPending = { team, spot, sc: opts.sc };
+      this.labEnd();
+      return;
+    }
     this.phase = "setup";
     this.deadTimer = rand(1.2, 2.0);
     this.possession = team;
@@ -1133,13 +1710,18 @@ export class Game {
     this.ball.loose = null;
     this.lastPasser = null;
     this.sinceCatch = 99;
+    this.fastBreak = 0;
+    this.screen = null;
     this.claims = [new Map(), new Map()];
+    this.setRoles(team);
     for (const t of this.teams) {
       for (const p of t.players) {
         p.driving = false;
         p.allowOOB = false;
         p.spotIdx = -1;
         p.spotTimer = 0;
+        p.rollTimer = 0;
+        p.zoneIdx = -1;
       }
     }
     const tp = this.teams[team].players;
@@ -1179,11 +1761,74 @@ export class Game {
     };
   }
 
+  /* ---------- possession lab ---------- */
+  static PLAY_LABELS: Record<PlayCall, string> = {
+    motion: "motion offense",
+    iso: "an isolation",
+    pnr: "the pick-and-roll",
+    post: "a post-up",
+  };
+  static SCHEME_LABELS: Record<DefScheme, string> = {
+    man: "man-to-man",
+    switch: "switch-everything",
+    zone: "a 2-3 zone",
+  };
+
+  /** Run a single scripted possession: offense runs `play`, defense
+      plays `defScheme`. The sim freezes when the possession ends. */
+  runPossession(opts: {
+    offense: number;
+    play: PlayCall;
+    defScheme: DefScheme;
+    focusSlot?: number | null;
+  }) {
+    if (this.over) return;
+    this.lab = { team: opts.offense };
+    this.frozen = false;
+    this.labPending = null;
+    this.tactics[opts.offense].play = opts.play;
+    this.tactics[opts.offense].focusSlot = opts.focusSlot ?? null;
+    this.tactics[1 - opts.offense].defScheme = opts.defScheme;
+    if (this.gameClock < 35) this.gameClock = 35; // room to run the play
+    this.emit(
+      "info",
+      `LAB — ${this.teams[opts.offense].name} run ${Game.PLAY_LABELS[opts.play]} against ${Game.SCHEME_LABELS[opts.defScheme]}`,
+      null
+    );
+    this.setupInbound(opts.offense, this.baselineSpot(opts.offense), { sc: 24 });
+  }
+
+  labEnd() {
+    this.frozen = true;
+    this.emit("info", `LAB — possession over. Run another or resume the game.`, null);
+  }
+
+  /** Leave lab mode and return to a normally simulated game. */
+  resumeGame() {
+    this.lab = null;
+    this.frozen = false;
+    this.tactics = [
+      { play: "motion", defScheme: "man", focusSlot: null },
+      { play: "motion", defScheme: "man", focusSlot: null },
+    ];
+    if (this.labPending) {
+      const { team, spot, sc } = this.labPending;
+      this.labPending = null;
+      this.setupInbound(team, spot, { sc });
+    } else {
+      this.setRoles(this.possession);
+    }
+  }
+
   /* ---------- periods ---------- */
   endQuarter() {
     this.ball.flight = null;
     this.ball.loose = null;
     this.ball.holder = null;
+    if (this.lab) {
+      this.labEnd();
+      return;
+    }
     const [a, b] = this.teams;
     if (this.quarter >= 4 && a.score !== b.score) {
       this.over = true;

@@ -33,9 +33,23 @@ export interface Tendencies {
   three: number;
   drive: number;
   pass: number;
+  kickout: number;
   help: number;
   crash: number;
   gamble: number;
+}
+
+/** Offensive play call for a possession. */
+export type PlayCall = "motion" | "iso" | "pnr" | "post";
+
+/** Defensive scheme for a possession. */
+export type DefScheme = "man" | "switch" | "zone";
+
+export interface Tactics {
+  play: PlayCall;
+  defScheme: DefScheme;
+  /** roster slot the play runs through (iso/post/pnr screener); null = auto */
+  focusSlot: number | null;
 }
 
 /**
@@ -108,6 +122,10 @@ export interface Player extends Ratings {
   spotIdx: number;
   spotTimer: number;
   markSlot?: number;
+  /** seconds left rolling to the rim after setting a screen */
+  rollTimer: number;
+  /** assigned slot in a zone defense, -1 when unassigned */
+  zoneIdx: number;
   stats: PlayerStats;
 }
 
@@ -130,7 +148,9 @@ export type SimEventType =
   | "turnover"
   | "rebound"
   | "recover"
-  | "loose";
+  | "loose"
+  | "pass"
+  | "info";
 
 export interface SimEvent {
   type: SimEventType;

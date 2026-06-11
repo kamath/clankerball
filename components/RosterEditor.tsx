@@ -44,6 +44,7 @@ const TENDENCIES: [keyof Player["tend"], string][] = [
   ["three", "TAKE 3s"],
   ["drive", "DRIVE"],
   ["pass", "PASS"],
+  ["kickout", "KICK OUT"],
   ["help", "HELP D"],
   ["crash", "CRASH GLASS"],
   ["gamble", "GAMBLE"],

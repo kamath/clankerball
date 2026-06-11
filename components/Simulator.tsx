@@ -7,6 +7,7 @@ import type { TeamOption } from "@/app/actions";
 import { BoxScore } from "./BoxScore";
 import { Court } from "./Court";
 import { Feed } from "./Feed";
+import { PossessionLab } from "./PossessionLab";
 import { RosterEditor } from "./RosterEditor";
 import { Scorebug } from "./Scorebug";
 import { TeamPicker } from "./TeamPicker";
@@ -46,9 +47,10 @@ export function Simulator({ initialConfig, teams }: SimulatorProps) {
         />
 
         <Tabs defaultValue="feed" className="flex flex-col">
-          <TabsList className="grid grid-cols-4">
+          <TabsList className="grid grid-cols-5">
             <TabsTrigger value="feed">Play-by-play</TabsTrigger>
             <TabsTrigger value="box">Box score</TabsTrigger>
+            <TabsTrigger value="lab">Lab</TabsTrigger>
             <TabsTrigger value="edit">Edit</TabsTrigger>
             <TabsTrigger value="teams">Teams</TabsTrigger>
           </TabsList>
@@ -60,6 +62,17 @@ export function Simulator({ initialConfig, teams }: SimulatorProps) {
           <TabsContent value="box">
             <ScrollArea className="h-[60vh] pr-3">
               <BoxScore teams={game.boxTeams} />
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="lab">
+            <ScrollArea className="h-[60vh] pr-3">
+              <PossessionLab
+                teams={game.boxTeams}
+                snapshot={snapshot}
+                onRun={game.runPossession}
+                onResume={game.resumeGame}
+              />
             </ScrollArea>
           </TabsContent>
 

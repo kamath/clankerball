@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Game, fmtClock } from "@/lib/engine";
 import { Renderer } from "@/lib/renderer";
-import type { GameConfig, Player, SimEvent } from "@/lib/types";
+import type { DefScheme, GameConfig, PlayCall, Player, SimEvent } from "@/lib/types";
 
 export interface Snapshot {
   scores: [number, number];
@@ -18,7 +18,16 @@ export interface Snapshot {
   shotClockActive: boolean;
   possession: number;
   over: boolean;
+  labActive: boolean;
+  labFrozen: boolean;
   teamMeta: { name: string; abbr: string; color: string }[];
+}
+
+export interface PossessionOpts {
+  offense: number;
+  play: PlayCall;
+  defScheme: DefScheme;
+  focusSlot?: number | null;
 }
 
 export interface BoxPlayer {
@@ -41,6 +50,8 @@ const emptySnapshot = (): Snapshot => ({
   shotClockActive: false,
   possession: 0,
   over: false,
+  labActive: false,
+  labFrozen: false,
   teamMeta: [],
 });
 
@@ -70,6 +81,8 @@ export function useGame(initialConfig: GameConfig) {
       shotClockActive: game.shotClockActive,
       possession: game.possession,
       over: game.over,
+      labActive: game.lab != null,
+      labFrozen: game.frozen,
       teamMeta: game.teams.map((t) => ({ name: t.name, abbr: t.abbr, color: t.color })),
     };
   }, []);
@@ -158,6 +171,28 @@ export function useGame(initialConfig: GameConfig) {
     setSpeedState(s);
   }, []);
 
+  /** Lab mode: run one scripted possession, then the sim freezes. */
+  const runPossession = useCallback(
+    (opts: PossessionOpts) => {
+      const game = gameRef.current;
+      if (!game) return;
+      game.runPossession(opts);
+      playingRef.current = true;
+      setPlaying(true);
+      setSnapshot(sampleSnapshot(game));
+    },
+    [sampleSnapshot]
+  );
+
+  const resumeGame = useCallback(() => {
+    const game = gameRef.current;
+    if (!game) return;
+    game.resumeGame();
+    playingRef.current = true;
+    setPlaying(true);
+    setSnapshot(sampleSnapshot(game));
+  }, [sampleSnapshot]);
+
   /** Mutate a live player's field in place (engine reads the same object). */
   const editPlayer = useCallback((teamIdx: number, slot: number, mutate: (p: Player) => void) => {
     const game = gameRef.current;
@@ -182,6 +217,8 @@ export function useGame(initialConfig: GameConfig) {
     togglePlay,
     setSpeed,
     editPlayer,
+    runPossession,
+    resumeGame,
     getConfig: () => configRef.current,
   };
 }

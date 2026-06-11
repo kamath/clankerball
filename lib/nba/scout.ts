@@ -255,6 +255,7 @@ export function ratePlayer(
     three: clamp(Math.round(10 + shotShare3 * 110), 5, 95),
     drive: tmap(z(s, "fta36") * 0.7 + (1 - shotShare3) * 0.6),
     pass: tmap(z(s, "ast36") * 0.9),
+    kickout: tmap(z(s, "ast36") * 0.6 + z(s, "fta36") * 0.3),
     help: tmap(z(s, "def_ws") * 0.5 + z(s, "charges36") * 0.4 + (big - 0.5) * 1.2),
     crash: tmap(z(s, "oreb36") * 0.9, 45),
     gamble: tmap(z(s, "deflections36") * 0.6 + z(s, "pct_stl") * 0.5),
