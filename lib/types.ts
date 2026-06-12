@@ -45,6 +45,16 @@ export type PlayCall = "motion" | "iso" | "pnr" | "post" | "dho";
 /** Defensive scheme for a possession. */
 export type DefScheme = "man" | "switch" | "zone";
 
+/** Where a scripted possession inbounds from (lab mode).
+    `full` = backcourt baseline (bring it up the floor); `side-*` = frontcourt
+    sideline (after-timeout set); `base-*` = under the offensive basket (BLOB). */
+export type InboundLoc =
+  | "full"
+  | "side-top"
+  | "side-bot"
+  | "base-top"
+  | "base-bot";
+
 /** A job given to one offensive player for a scripted possession. */
 export type PlayerAssignment =
   | "handler"
@@ -62,6 +72,8 @@ export interface Tactics {
   focusSlot: number | null;
   /** per-roster-slot jobs (lab mode); null/missing = auto */
   assignments?: (PlayerAssignment | null)[];
+  /** roster slot that throws the inbound (lab mode); null/missing = auto */
+  inbounderSlot?: number | null;
 }
 
 /**

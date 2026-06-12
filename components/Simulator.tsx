@@ -90,6 +90,8 @@ export function Simulator({ initialConfig, teams }: SimulatorProps) {
               labPhase={game.labPhase}
               labTool={game.labTool}
               onStage={game.stageLab}
+              onConfirm={game.confirmLab}
+              onEdit={game.editLab}
               onRun={game.runLab}
               onToolChange={game.setLabTool}
               onClearPaths={game.clearLabPaths}

@@ -11,6 +11,7 @@ import { PAD, Renderer, SCALE } from "@/lib/renderer";
 import type {
   DefScheme,
   GameConfig,
+  InboundLoc,
   PlayCall,
   Player,
   PlayerAssignment,
@@ -18,7 +19,7 @@ import type {
   Vec,
 } from "@/lib/types";
 
-export type LabPhase = "idle" | "staged" | "running" | "ended";
+export type LabPhase = "idle" | "config" | "staged" | "running" | "ended";
 export type LabTool = "move" | "path";
 
 export interface Snapshot {
@@ -38,8 +39,9 @@ export interface PossessionOpts {
   offense: number;
   play: PlayCall;
   defScheme: DefScheme;
-  start: "full" | "half";
+  start: InboundLoc;
   assignments: (PlayerAssignment | null)[];
+  inbounder: number | null;
 }
 
 export interface BoxPlayer {
@@ -294,8 +296,10 @@ export function useGame(initialConfig: GameConfig) {
   }, []);
 
   /** Stage a possession in a fresh sandboxed game (real game untouched):
-      players snap into formation and the scene freezes for editing —
-      drag players, draw paths — until runLab() lets it play. */
+      players snap into formation. Lands in the "config" phase — tweak the
+      play, scheme, roles, and inbounder freely (each change re-stages). The
+      court editing tools (drag / draw) stay locked until confirmLab() so the
+      moves and paths you author can't be wiped by a re-stage. */
   const stageLab = useCallback(
     (opts: PossessionOpts) => {
       labReadyRef.current = false; // mute events until the play actually runs
@@ -305,18 +309,34 @@ export function useGame(initialConfig: GameConfig) {
           setLabEvents((prev) => (prev.length > 100 ? [e, ...prev.slice(0, 100)] : [e, ...prev]));
         },
       });
-      lab.runPossession(opts);
-      lab.frozen = true; // staged: hold the formation for editing
+      lab.runPossession({ ...opts, inbounderSlot: opts.inbounder });
+      lab.frozen = true; // hold the formation for editing
       labGameRef.current = lab;
       setLabEvents([]);
       modeRef.current = "lab";
-      setLabPhase("staged");
+      setLabPhase("config");
       playingRef.current = true;
       setPlaying(true);
       setSnapshot(sampleSnapshot(lab));
     },
     [sampleSnapshot, setLabPhase]
   );
+
+  /** Lock the lineup & roles and open the court for editing: now the drag /
+      draw tools are live and the moves and paths you author will persist
+      (config changes are disabled, so nothing re-stages under you). */
+  const confirmLab = useCallback(() => {
+    if (!labGameRef.current || labPhaseRef.current !== "config") return;
+    setLabPhase("staged");
+  }, [setLabPhase]);
+
+  /** Go back to editing the setup. The formation and any authored moves /
+      paths are kept; they only get wiped if a config control is changed
+      (which re-stages a clean formation). */
+  const editLab = useCallback(() => {
+    if (!labGameRef.current || labPhaseRef.current !== "staged") return;
+    setLabPhase("config");
+  }, [setLabPhase]);
 
   /** Let the staged possession play out. */
   const runLab = useCallback(() => {
@@ -384,6 +404,8 @@ export function useGame(initialConfig: GameConfig) {
     setSpeed,
     editPlayer,
     stageLab,
+    confirmLab,
+    editLab,
     runLab,
     exitLab,
     clearLabPaths,

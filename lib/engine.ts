@@ -10,6 +10,7 @@ import type {
   DefScheme,
   GameConfig,
   GameOpts,
+  InboundLoc,
   PlayCall,
   Player,
   PlayerAssignment,
@@ -476,6 +477,30 @@ export class Game {
     const dir = hoop.x > COURT.W / 2 ? -1 : 1; // toward midcourt
     const y = Math.random() < 0.5 ? -1.5 : COURT.H + 1.5;
     return { x: hoop.x + dir * 19, y };
+  }
+  /** Deterministic inbound spot for a named lab location, so re-staging
+      never makes the ball jump to a new random spot. */
+  labInboundSpot(team: number, loc: InboundLoc): Vec {
+    const oh = this.hoops[team]; // hoop the offense attacks
+    const dir = oh.x > COURT.W / 2 ? -1 : 1; // toward midcourt
+    const top = -1.5;
+    const bot = COURT.H + 1.5;
+    const baseX = dir < 0 ? COURT.W + 1.5 : -1.5; // behind the offensive basket
+    switch (loc) {
+      case "side-top":
+        return { x: oh.x + dir * 19, y: top };
+      case "side-bot":
+        return { x: oh.x + dir * 19, y: bot };
+      case "base-top":
+        return { x: baseX, y: COURT.H / 2 - 8 };
+      case "base-bot":
+        return { x: baseX, y: COURT.H / 2 + 8 };
+      case "full":
+      default: {
+        const dh = this.hoops[1 - team]; // behind the basket the offense defends
+        return { x: dh.x > COURT.W / 2 ? COURT.W + 1.5 : -1.5, y: COURT.H / 2 };
+      }
+    }
   }
   oobSpot(p: Vec) {
     const dl = p.x,
@@ -1961,10 +1986,18 @@ export class Game {
       }
     }
     const tp = this.teams[team].players;
-    // the designated handler should be receiving, not throwing it in
-    const inbCands = tp.filter((p) => p !== this.roles.handler);
-    let inb = inbCands[0] || tp[0];
-    for (const p of inbCands) if (dist(p.pos, spot) < dist(inb.pos, spot)) inb = p;
+    // lab: honor an explicitly chosen inbounder; otherwise the designated
+    // handler should be receiving, not throwing it in, so pick the man
+    // already closest to the inbound spot
+    const chosenInb = this.tactics[team].inbounderSlot;
+    let inb: Player;
+    if (chosenInb != null && tp[chosenInb]) {
+      inb = tp[chosenInb];
+    } else {
+      const inbCands = tp.filter((p) => p !== this.roles.handler);
+      inb = inbCands[0] || tp[0];
+      for (const p of inbCands) if (dist(p.pos, spot) < dist(inb.pos, spot)) inb = p;
+    }
     inb.allowOOB = true;
     inb.moveTarget = { ...spot };
     const rest = tp.filter((p) => p !== inb);
@@ -2031,8 +2064,9 @@ export class Game {
     play: PlayCall;
     defScheme: DefScheme;
     focusSlot?: number | null;
-    start?: "full" | "half";
+    start?: InboundLoc;
     assignments?: (PlayerAssignment | null)[];
+    inbounderSlot?: number | null;
   }) {
     if (this.over) return;
     this.lab = { team: opts.offense };
@@ -2041,6 +2075,7 @@ export class Game {
     this.tactics[opts.offense].play = opts.play;
     this.tactics[opts.offense].focusSlot = opts.focusSlot ?? null;
     this.tactics[opts.offense].assignments = opts.assignments;
+    this.tactics[opts.offense].inbounderSlot = opts.inbounderSlot ?? null;
     this.tactics[1 - opts.offense].defScheme = opts.defScheme;
     if (this.gameClock < 35) this.gameClock = 35; // room to run the play
     this.emit(
@@ -2048,8 +2083,7 @@ export class Game {
       `LAB — ${this.teams[opts.offense].name} run ${Game.PLAY_LABELS[opts.play]} against ${Game.SCHEME_LABELS[opts.defScheme]}`,
       null
     );
-    const spot =
-      opts.start === "half" ? this.sidelineSpot(opts.offense) : this.baselineSpot(opts.offense);
+    const spot = this.labInboundSpot(opts.offense, opts.start ?? "full");
     this.setupInbound(opts.offense, spot, { sc: 24 });
     // drill-style start: snap everyone straight into formation instead
     // of jogging there, so the inbound always looks traditional
@@ -2106,8 +2140,8 @@ export class Game {
     this.lab = null;
     this.frozen = false;
     this.tactics = [
-      { play: "motion", defScheme: "man", focusSlot: null },
-      { play: "motion", defScheme: "man", focusSlot: null },
+      { play: "motion", defScheme: "man", focusSlot: null, inbounderSlot: null },
+      { play: "motion", defScheme: "man", focusSlot: null, inbounderSlot: null },
     ];
     if (this.labPending) {
       const { team, spot, sc } = this.labPending;

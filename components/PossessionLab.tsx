@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import type { BoxTeam, LabPhase, LabTool, PossessionOpts, Snapshot } from "@/hooks/useGame";
-import type { DefScheme, PlayCall, PlayerAssignment, SimEvent } from "@/lib/types";
+import type { DefScheme, InboundLoc, PlayCall, PlayerAssignment, SimEvent } from "@/lib/types";
 
 const PLAYS: { value: PlayCall; label: string; blurb: string }[] = [
   { value: "motion", label: "Motion", blurb: "free-flowing offense, everyone hunts a spot" },
@@ -34,6 +34,14 @@ const SCHEMES: { value: DefScheme; label: string; blurb: string }[] = [
   { value: "man", label: "Man-to-man", blurb: "stick with your matchup" },
   { value: "switch", label: "Switch everything", blurb: "trade assignments on every screen" },
   { value: "zone", label: "2-3 Zone", blurb: "guard your area, pack the paint" },
+];
+
+const INBOUNDS: { value: InboundLoc; label: string }[] = [
+  { value: "full", label: "Full court — baseline" },
+  { value: "side-top", label: "Sideline — top" },
+  { value: "side-bot", label: "Sideline — bottom" },
+  { value: "base-top", label: "Baseline — top (under basket)" },
+  { value: "base-bot", label: "Baseline — bottom (under basket)" },
 ];
 
 const ASSIGNMENTS: { value: PlayerAssignment | "auto"; label: string }[] = [
@@ -54,6 +62,8 @@ interface PossessionLabProps {
   labPhase: LabPhase;
   labTool: LabTool;
   onStage: (opts: PossessionOpts) => void;
+  onConfirm: () => void;
+  onEdit: () => void;
   onRun: () => void;
   onToolChange: (t: LabTool) => void;
   onClearPaths: () => void;
@@ -65,6 +75,8 @@ export function PossessionLab({
   labPhase,
   labTool,
   onStage,
+  onConfirm,
+  onEdit,
   onRun,
   onToolChange,
   onClearPaths,
@@ -72,13 +84,16 @@ export function PossessionLab({
   const [offense, setOffense] = useState(0);
   const [play, setPlay] = useState<PlayCall>("pnr");
   const [scheme, setScheme] = useState<DefScheme>("man");
-  const [start, setStart] = useState<"full" | "half">("half");
+  const [start, setStart] = useState<InboundLoc>("side-top");
   const [assignments, setAssignments] = useState<(PlayerAssignment | "auto")[]>(
     Array(5).fill("auto")
   );
+  const [inbounder, setInbounder] = useState<number | "auto">("auto");
   const [rev, setRev] = useState(0); // bump to re-stage with same options
 
-  // any change to the script instantly re-stages the formation
+  // while configuring, any change to the script instantly re-stages the
+  // formation. once the lineup is confirmed the config controls lock, so this
+  // never fires under authored moves/paths and wipes them.
   useEffect(() => {
     onStage({
       offense,
@@ -86,10 +101,14 @@ export function PossessionLab({
       defScheme: scheme,
       start,
       assignments: assignments.map((a) => (a === "auto" ? null : a)),
+      inbounder: inbounder === "auto" ? null : inbounder,
     });
-  }, [offense, play, scheme, start, assignments, rev, onStage]);
+  }, [offense, play, scheme, start, assignments, inbounder, rev, onStage]);
 
   if (teams.length < 2) return null;
+  // config controls are live only while configuring; confirming locks them so
+  // court edits survive
+  const configurable = labPhase === "config" || labPhase === "idle";
   const offTeam = teams[offense];
   const playMeta = PLAYS.find((p) => p.value === play)!;
   const schemeMeta = SCHEMES.find((s) => s.value === scheme)!;
@@ -117,9 +136,11 @@ export function PossessionLab({
                 key={ti}
                 size="sm"
                 variant={offense === ti ? "secondary" : "outline"}
+                disabled={!configurable}
                 onClick={() => {
                   setOffense(ti);
                   setAssignments(Array(5).fill("auto"));
+                  setInbounder("auto");
                 }}
               >
                 <span className="mr-1.5 size-2.5 rounded-full" style={{ background: t.color }} />
@@ -129,30 +150,52 @@ export function PossessionLab({
           </div>
         </div>
         <div className="flex flex-col gap-1.5">
-          <Label>Inbound</Label>
-          <div className="flex gap-1.5">
-            <Button
-              size="sm"
-              variant={start === "half" ? "secondary" : "outline"}
-              onClick={() => setStart("half")}
-            >
-              Half court
-            </Button>
-            <Button
-              size="sm"
-              variant={start === "full" ? "secondary" : "outline"}
-              onClick={() => setStart("full")}
-            >
-              Full court
-            </Button>
-          </div>
+          <Label>Inbound location</Label>
+          <Select
+            value={start}
+            onValueChange={(v) => setStart(v as InboundLoc)}
+            disabled={!configurable}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {INBOUNDS.map((l) => (
+                <SelectItem key={l.value} value={l.value}>
+                  {l.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label>Inbounder</Label>
+        <Select
+          value={String(inbounder)}
+          onValueChange={(v) => setInbounder(v === "auto" ? "auto" : Number(v))}
+          disabled={!configurable}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="auto">Auto (nearest to the ball)</SelectItem>
+            {offTeam.players.map((bp, slot) => (
+              <SelectItem key={bp.id} value={String(slot)}>
+                #{bp.number} {bp.name.split(" ").slice(-1)[0]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">Who throws the ball in to start the play.</p>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
         <div className="flex flex-col gap-1.5">
           <Label>Play call</Label>
-          <Select value={play} onValueChange={(v) => setPlay(v as PlayCall)}>
+          <Select value={play} onValueChange={(v) => setPlay(v as PlayCall)} disabled={!configurable}>
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
@@ -168,7 +211,7 @@ export function PossessionLab({
         </div>
         <div className="flex flex-col gap-1.5">
           <Label>Defense</Label>
-          <Select value={scheme} onValueChange={(v) => setScheme(v as DefScheme)}>
+          <Select value={scheme} onValueChange={(v) => setScheme(v as DefScheme)} disabled={!configurable}>
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
@@ -194,6 +237,7 @@ export function PossessionLab({
             <Select
               value={assignments[slot]}
               onValueChange={(v) => setAssignment(slot, v as PlayerAssignment | "auto")}
+              disabled={!configurable}
             >
               <SelectTrigger className="h-8 flex-1">
                 <SelectValue />
@@ -240,14 +284,29 @@ export function PossessionLab({
               : "Drag from an offensive player to draw the route he'll run."
             : labPhase === "running"
               ? "Play in progress — watch the court."
-              : "Possession over — reset to tweak it and run it back."}
+              : labPhase === "ended"
+                ? "Possession over — reset to tweak it and run it back."
+                : "Lock the lineup below to unlock moves & paths."}
         </p>
       </div>
 
       <div className="flex gap-2">
-        <Button onClick={onRun} disabled={labPhase !== "staged"}>
-          Run play
-        </Button>
+        {configurable ? (
+          <Button onClick={onConfirm} className="flex-1">
+            Confirm lineup & roles
+          </Button>
+        ) : (
+          <>
+            <Button onClick={onRun} disabled={labPhase !== "staged"}>
+              Run play
+            </Button>
+            {labPhase === "staged" && (
+              <Button variant="outline" onClick={onEdit}>
+                Edit setup
+              </Button>
+            )}
+          </>
+        )}
         <Button variant="outline" onClick={() => setRev((r) => r + 1)}>
           Reset formation
         </Button>
