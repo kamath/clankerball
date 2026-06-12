@@ -91,9 +91,8 @@ export function Simulator({ initialConfig, teams }: SimulatorProps) {
               labTool={game.labTool}
               labRoles={game.labRoles}
               onStage={game.stageLab}
-              onConfirm={game.confirmLab}
-              onEdit={game.editLab}
               onRun={game.runLab}
+              onReRun={game.reRunLab}
               onToolChange={game.setLabTool}
               onClearPaths={game.clearLabPaths}
               onSetDefense={game.setLabDefense}

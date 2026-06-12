@@ -1,11 +1,12 @@
 "use client";
 /* ============================================================
-   PossessionLab — interactive play designer on a sandboxed game.
-   Picking a play / defense / start instantly stages the players
-   into their formation on the court. While staged you can drag
-   players, draw motion paths, and hand out roles; Run plays the
-   possession and freezes when it ends. The real game is paused
-   and untouched the whole time.
+   PossessionLab — interactive possession designer on a sandboxed
+   game. Pick the team, where it inbounds, who throws it in, the
+   defense it's working against, and your scoring options (a top
+   option plus optional second and third looks). The players snap
+   into formation; while staged you can drag them anywhere and draw
+   the motion paths they run. Run plays the possession and freezes
+   when it ends. The real game is paused and untouched the whole time.
    ============================================================ */
 import { useEffect, useRef, useState } from "react";
 import { MousePointer2, PenLine, Eraser } from "lucide-react";
@@ -20,15 +21,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import type { BoxTeam, LabPhase, LabTool, PossessionOpts, Snapshot } from "@/hooks/useGame";
-import type { DefScheme, InboundLoc, PlayCall, PlayerAssignment, SimEvent } from "@/lib/types";
-
-const PLAYS: { value: PlayCall; label: string; blurb: string }[] = [
-  { value: "motion", label: "Motion", blurb: "free-flowing offense, everyone hunts a spot" },
-  { value: "iso", label: "Isolation", blurb: "clear out and let the go-to guy work" },
-  { value: "pnr", label: "Pick & roll", blurb: "screen for the handler, roll to the rim" },
-  { value: "dho", label: "Dribble hand-off", blurb: "dribble at the receiver, hand it off, attack" },
-  { value: "post", label: "Post-up", blurb: "feed the big on the block" },
-];
+import type { DefScheme, InboundLoc, SimEvent } from "@/lib/types";
 
 const SCHEMES: { value: DefScheme; label: string; blurb: string }[] = [
   { value: "man", label: "Man-to-man", blurb: "stick with your matchup" },
@@ -44,30 +37,11 @@ const INBOUNDS: { value: InboundLoc; label: string }[] = [
   { value: "base-bot", label: "Baseline — bottom (under basket)" },
 ];
 
-// on-court annotation -> friendly text for the "Auto — …" role hint
-const ROLE_FRIENDLY: Record<string, string> = {
-  HANDLER: "Handler",
-  SCREENER: "Screener",
-  "GO-TO": "Go-to",
-  ISO: "Iso",
-  POST: "Post",
-  DHO: "Hand-off",
-  CORNER: "Corner",
-  WING: "Wing",
-  TOP: "Top",
-  DUNKER: "Dunker",
-  SPACE: "Space",
-};
-
-const ASSIGNMENTS: { value: PlayerAssignment | "auto"; label: string }[] = [
-  { value: "auto", label: "Auto" },
-  { value: "handler", label: "Ball handler" },
-  { value: "screener", label: "Screener" },
-  { value: "focus", label: "Go-to guy" },
-  { value: "corner", label: "Corner" },
-  { value: "wing", label: "Wing" },
-  { value: "top", label: "Top of key" },
-  { value: "dunker", label: "Dunker spot" },
+const OPTION_LABELS = ["Top option", "Second option", "Third option"];
+const OPTION_HINTS = [
+  "your go-to scorer — the offense looks here first",
+  "optional — the next look when the top option is covered",
+  "optional — the third release valve",
 ];
 
 interface PossessionLabProps {
@@ -78,9 +52,8 @@ interface PossessionLabProps {
   labTool: LabTool;
   labRoles: (string | null)[];
   onStage: (opts: PossessionOpts) => void;
-  onConfirm: () => void;
-  onEdit: () => void;
   onRun: () => void;
+  onReRun: () => void;
   onToolChange: (t: LabTool) => void;
   onClearPaths: () => void;
   onSetDefense: (scheme: DefScheme) => void;
@@ -93,20 +66,17 @@ export function PossessionLab({
   labTool,
   labRoles,
   onStage,
-  onConfirm,
-  onEdit,
   onRun,
+  onReRun,
   onToolChange,
   onClearPaths,
   onSetDefense,
 }: PossessionLabProps) {
   const [offense, setOffense] = useState(0);
-  const [play, setPlay] = useState<PlayCall>("pnr");
   const [scheme, setScheme] = useState<DefScheme>("man");
   const [start, setStart] = useState<InboundLoc>("side-top");
-  const [assignments, setAssignments] = useState<(PlayerAssignment | "auto")[]>(
-    Array(5).fill("auto")
-  );
+  // scoring options in priority order: [top, second, third]; null = unset
+  const [scorers, setScorers] = useState<(number | null)[]>([null, null, null]);
   const [inbounder, setInbounder] = useState<number | "auto">("auto");
   const [rev, setRev] = useState(0); // bump to re-stage with same options
 
@@ -116,37 +86,36 @@ export function PossessionLab({
   const schemeRef = useRef(scheme);
   schemeRef.current = scheme;
 
-  // while configuring, any change to the offensive script instantly re-stages
+  // while configuring, any change to the offensive setup instantly re-stages
   // the formation. the defense is handled separately (see the scheme select),
   // so changing it never disturbs the offense. once the lineup is confirmed the
   // config controls lock, so this never fires under authored moves/paths.
   useEffect(() => {
     onStage({
       offense,
-      play,
       defScheme: schemeRef.current,
       start,
-      assignments: assignments.map((a) => (a === "auto" ? null : a)),
+      scorers: scorers.filter((s): s is number => s !== null),
       inbounder: inbounder === "auto" ? null : inbounder,
     });
-  }, [offense, play, start, assignments, inbounder, rev, onStage]);
+  }, [offense, start, scorers, inbounder, rev, onStage]);
 
   if (teams.length < 2) return null;
-  // config controls are live only while configuring; confirming locks them so
-  // court edits survive
-  const configurable = labPhase === "config" || labPhase === "idle";
+  // config controls are live whenever the play isn't actively running; changing
+  // one re-stages a clean formation (which resets spots and clears routes)
+  const configurable = labPhase !== "running";
   const offTeam = teams[offense];
-  const playMeta = PLAYS.find((p) => p.value === play)!;
   const schemeMeta = SCHEMES.find((s) => s.value === scheme)!;
+  const handlerSlot = labRoles.findIndex((r) => r === "HANDLER");
 
-  const setAssignment = (slot: number, v: PlayerAssignment | "auto") => {
-    setAssignments((prev) => {
+  // pick a scoring option, keeping the three slots unique
+  const setScorer = (idx: number, v: number | null) => {
+    setScorers((prev) => {
       const next = [...prev];
-      // unique roles: claiming handler/screener/go-to releases it elsewhere
-      if (v === "handler" || v === "screener" || v === "focus") {
-        for (let i = 0; i < next.length; i++) if (next[i] === v) next[i] = "auto";
+      if (v !== null) {
+        for (let i = 0; i < next.length; i++) if (next[i] === v) next[i] = null;
       }
-      next[slot] = v;
+      next[idx] = v;
       return next;
     });
   };
@@ -165,7 +134,7 @@ export function PossessionLab({
                 disabled={!configurable}
                 onClick={() => {
                   setOffense(ti);
-                  setAssignments(Array(5).fill("auto"));
+                  setScorers([null, null, null]);
                   setInbounder("auto");
                 }}
               >
@@ -196,44 +165,26 @@ export function PossessionLab({
         </div>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <Label>Inbounder</Label>
-        <Select
-          value={String(inbounder)}
-          onValueChange={(v) => setInbounder(v === "auto" ? "auto" : Number(v))}
-          disabled={!configurable}
-        >
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="auto">Auto (nearest to the ball)</SelectItem>
-            {offTeam.players.map((bp, slot) => (
-              <SelectItem key={bp.id} value={String(slot)}>
-                #{bp.number} {bp.name.split(" ").slice(-1)[0]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">Who throws the ball in to start the play.</p>
-      </div>
-
       <div className="grid grid-cols-2 gap-3">
         <div className="flex flex-col gap-1.5">
-          <Label>Play call</Label>
-          <Select value={play} onValueChange={(v) => setPlay(v as PlayCall)} disabled={!configurable}>
+          <Label>Inbounder</Label>
+          <Select
+            value={String(inbounder)}
+            onValueChange={(v) => setInbounder(v === "auto" ? "auto" : Number(v))}
+            disabled={!configurable}
+          >
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {PLAYS.map((p) => (
-                <SelectItem key={p.value} value={p.value}>
-                  {p.label}
+              <SelectItem value="auto">Auto (nearest to the ball)</SelectItem>
+              {offTeam.players.map((bp, slot) => (
+                <SelectItem key={bp.id} value={String(slot)}>
+                  #{bp.number} {bp.name.split(" ").slice(-1)[0]}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">{playMeta.blurb}</p>
         </div>
         <div className="flex flex-col gap-1.5">
           <Label>Defense</Label>
@@ -261,40 +212,41 @@ export function PossessionLab({
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Roles & routes ({offTeam.name})</Label>
-        {offTeam.players.map((bp, slot) => (
-          <div key={bp.id} className="flex items-center gap-2">
-            <span className="w-24 truncate text-sm">
-              #{bp.number} {bp.name.split(" ").slice(-1)[0]}
-            </span>
-            <Select
-              value={assignments[slot]}
-              onValueChange={(v) => setAssignment(slot, v as PlayerAssignment | "auto")}
-              disabled={!configurable}
-            >
-              <SelectTrigger className="h-8 flex-1">
-                <span className="truncate">
-                  {assignments[slot] === "auto"
-                    ? labRoles[slot]
-                      ? `Auto — ${ROLE_FRIENDLY[labRoles[slot]!] ?? labRoles[slot]}`
-                      : "Auto"
-                    : ASSIGNMENTS.find((a) => a.value === assignments[slot])?.label}
-                </span>
-              </SelectTrigger>
-              <SelectContent>
-                {ASSIGNMENTS.map((a) => (
-                  <SelectItem key={a.value} value={a.value}>
-                    {a.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+        <Label>Scoring options ({offTeam.name})</Label>
+        {OPTION_LABELS.map((label, idx) => (
+          <div key={idx} className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <span className="w-24 shrink-0 text-sm font-medium">{label}</span>
+              <Select
+                value={scorers[idx] === null ? "none" : String(scorers[idx])}
+                onValueChange={(v) => setScorer(idx, v === "none" ? null : Number(v))}
+                disabled={!configurable}
+              >
+                <SelectTrigger className="h-8 flex-1">
+                  <SelectValue placeholder="None" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">{idx === 0 ? "None (let it flow)" : "None"}</SelectItem>
+                  {offTeam.players.map((bp, slot) => (
+                    <SelectItem key={bp.id} value={String(slot)}>
+                      #{bp.number} {bp.name.split(" ").slice(-1)[0]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="pl-[6.5rem] text-xs text-muted-foreground">{OPTION_HINTS[idx]}</p>
           </div>
         ))}
-        <p className="text-xs text-muted-foreground">
-          Routes are drawn for the players the play moves. Use{" "}
-          <span className="font-medium">Draw path</span> below to add or reshape one.
-        </p>
+        {handlerSlot >= 0 && offTeam.players[handlerSlot] && (
+          <p className="text-xs text-muted-foreground">
+            Bringing it up:{" "}
+            <span className="font-medium">
+              #{offTeam.players[handlerSlot].number}{" "}
+              {offTeam.players[handlerSlot].name.split(" ").slice(-1)[0]}
+            </span>
+          </p>
+        )}
       </div>
 
       <div className="flex flex-col gap-1.5">
@@ -328,27 +280,20 @@ export function PossessionLab({
             : labPhase === "running"
               ? "Play in progress — watch the court."
               : labPhase === "ended"
-                ? "Possession over — reset to tweak it and run it back."
-                : "Lock the lineup below to unlock moves & paths."}
+                ? "Possession over — re-run it, or tweak the setup to restage."
+                : "Drag players and draw their routes, then run the play."}
         </p>
       </div>
 
       <div className="flex gap-2">
-        {configurable ? (
-          <Button onClick={onConfirm} className="flex-1">
-            Confirm lineup & roles
+        {labPhase === "ended" ? (
+          <Button onClick={onReRun} className="flex-1">
+            Re-run play
           </Button>
         ) : (
-          <>
-            <Button onClick={onRun} disabled={labPhase !== "staged"}>
-              Run play
-            </Button>
-            {labPhase === "staged" && (
-              <Button variant="outline" onClick={onEdit}>
-                Edit setup
-              </Button>
-            )}
-          </>
+          <Button onClick={onRun} disabled={labPhase !== "staged"} className="flex-1">
+            Run play
+          </Button>
         )}
         <Button variant="outline" onClick={() => setRev((r) => r + 1)}>
           Reset formation

@@ -11,9 +11,7 @@ import type {
   GameConfig,
   GameOpts,
   InboundLoc,
-  PlayCall,
   Player,
-  PlayerAssignment,
   PlayerConfig,
   Ratings,
   SimEvent,
@@ -79,6 +77,23 @@ interface Spot {
   ax: number;
   ay: number;
   cat: "three" | "mid" | "inside";
+}
+
+/** A captured staged possession — enough to run the exact same play again. */
+export interface LabSetup {
+  players: {
+    team: number;
+    slot: number;
+    pos: Vec;
+    moveTarget: Vec | null;
+    path: Vec[] | null;
+    pathHold: boolean;
+  }[];
+  assignTargets: [number, Spot][];
+  inbSpot: Vec;
+  inbounderSlot: number;
+  labTeam: number;
+  gameClock: number;
 }
 
 /* Half-court spots in "attack space": ax = feet from hoop toward
@@ -278,9 +293,16 @@ export class Game {
   deadTimer = 0;
   inb!: { inbounder: Player; receiver: Player; spot: Vec };
   tactics!: Tactics[];
-  /** play roles for the team currently on offense */
-  roles!: { handler: Player | null; screener: Player | null; focus: Player | null };
-  /** fixed spacing spots from per-player assignments, keyed by player id */
+  /** roles for the team currently on offense. `focus` is the primary scoring
+      option; `scorers` is every option in priority order. `screener` is kept
+      for the inert screen machinery and is currently always null. */
+  roles!: {
+    handler: Player | null;
+    screener: Player | null;
+    focus: Player | null;
+    scorers: Player[];
+  };
+  /** fixed hold-spots for dragged-into-place players, keyed by player id */
   assignTargets: Map<number, Spot> = new Map();
   screen!: { timer: number; screener: Player; handler: Player } | null;
   /** seconds of transition remaining after a live change of possession */
@@ -323,10 +345,10 @@ export class Game {
     this.lastShotTeam = 0;
     this.claims = [new Map(), new Map()];
     this.tactics = [
-      { play: "motion", defScheme: "man", focusSlot: null },
-      { play: "motion", defScheme: "man", focusSlot: null },
+      { defScheme: "man", scorers: [] },
+      { defScheme: "man", scorers: [] },
     ];
-    this.roles = { handler: null, screener: null, focus: null };
+    this.roles = { handler: null, screener: null, focus: null, scorers: [] };
     this.screen = null;
     this.emit("period", `Tip-off! Jump ball at center court`, null);
     this.setupTipoff();
@@ -644,7 +666,6 @@ export class Game {
       this.transitionOffense();
       return;
     }
-    const play = this.tactics[this.possession].play;
     const holder = this.ball.holder;
     for (const p of this.teams[this.possession].players) {
       if (p === holder) continue;
@@ -674,63 +695,23 @@ export class Game {
         p.moveTarget = this.spotPos(p.team, { ax: 3, ay: side * 4, cat: "inside" });
         continue;
       }
-      if (this.playTarget(p, play, holder)) continue;
+      if (this.playTarget(p)) continue;
       p.spotTimer -= dt;
-      if (p.spotIdx < 0 || p.spotTimer <= 0) this.assignSpot(p, play);
+      if (p.spotIdx < 0 || p.spotTimer <= 0) this.assignSpot(p);
       p.moveTarget = this.spotPos(p.team, SPOTS[p.spotIdx]);
     }
-    this.updateScreen(play, holder);
   }
 
-  /** Play-specific off-ball assignment. Returns true if it set a target. */
-  playTarget(p: Player, play: PlayCall, holder: Player | null): boolean {
-    const { focus, screener } = this.roles;
-    // explicit per-player spacing job: hold that spot
+  /** Off-ball assignment for players dragged to a fixed hold-spot. Returns
+      true if it set a target; otherwise the player flows in the motion spots. */
+  playTarget(p: Player): boolean {
+    // a player dragged into place holds that spot instead of drifting
     const fixed = this.assignTargets.get(p.id);
-    if (fixed && p !== screener && p !== focus) {
+    if (fixed && p !== this.roles.focus) {
       p.moveTarget = this.spotPos(p.team, fixed);
       return true;
     }
-    if (play === "iso" && p === focus) {
-      // the iso man posts up at the top of the key waiting for the ball
-      p.moveTarget = this.spotPos(p.team, { ax: 24.5, ay: 0, cat: "three" });
-      return true;
-    }
-    if (play === "post" && p === focus) {
-      const side = p.pos.y >= COURT.H / 2 ? 1 : -1;
-      p.moveTarget = this.spotPos(p.team, { ax: 4.5, ay: side * 5.5, cat: "inside" });
-      return true;
-    }
-    if (play === "dho" && p === focus && holder === this.roles.handler) {
-      // wait on the wing for the handler to dribble into the hand-off
-      const side = p.pos.y >= COURT.H / 2 ? 1 : -1;
-      p.moveTarget = this.spotPos(p.team, { ax: 17, ay: 14 * side, cat: "three" });
-      return true;
-    }
-    if (play === "pnr" && p === screener && holder === this.roles.handler && holder) {
-      if (this.inFrontcourt(holder.pos, holder.team) && !holder.driving && !this.screen) {
-        // come set the screen right next to the handler
-        const hoop = this.hoops[p.team];
-        const ux = (hoop.x - holder.pos.x) / (dist(holder.pos, hoop) || 1);
-        p.moveTarget = { x: holder.pos.x + ux * 1.5, y: holder.pos.y + (p.pos.y >= holder.pos.y ? 2 : -2) };
-        return true;
-      }
-    }
     return false;
-  }
-
-  /** Trigger the pick-and-roll once the screener arrives at the ball. */
-  updateScreen(play: PlayCall, holder: Player | null) {
-    if (play !== "pnr" || this.screen) return;
-    const { handler, screener } = this.roles;
-    if (!handler || !screener || holder !== handler) return;
-    if (!this.inFrontcourt(handler.pos, handler.team) || handler.driving) return;
-    if (dist(screener.pos, handler.pos) < 3.2 && screener.rollTimer <= 0) {
-      this.screen = { timer: 1.0, screener, handler };
-      screener.rollTimer = 2.4;
-      handler.driving = true;
-      handler.driveSide = handler.pos.y >= screener.pos.y ? 1 : -1; // attack off the pick
-    }
   }
 
   /** Fill the lanes: rim runner, two corner sprinters, a trailer. */
@@ -770,22 +751,17 @@ export class Game {
     }
   }
 
-  assignSpot(p: Player, play: PlayCall = "motion") {
+  assignSpot(p: Player) {
     const claims = this.claims[p.team];
     claims.delete(p.id);
     const taken = new Set(claims.values());
-    let cat: Spot["cat"];
-    if (play !== "motion") {
-      cat = "three"; // iso/pnr/post: everyone else spaces to the arc
-    } else {
-      const tf = (t: number) => 0.3 + t * 0.014; // tendency factor: 50 -> 1.0
-      const w3 = Math.pow(p.threePoint, 2.2) * tf(p.tend.three);
-      const wm = Math.pow(p.midRange, 2.2);
-      const wi = Math.pow((p.layup + p.dunk) / 2, 2.2) * tf(p.tend.drive);
-      const total = w3 + wm + wi;
-      const r = Math.random() * total;
-      cat = r < w3 ? "three" : r < w3 + wm ? "mid" : "inside";
-    }
+    const tf = (t: number) => 0.3 + t * 0.014; // tendency factor: 50 -> 1.0
+    const w3 = Math.pow(p.threePoint, 2.2) * tf(p.tend.three);
+    const wm = Math.pow(p.midRange, 2.2);
+    const wi = Math.pow((p.layup + p.dunk) / 2, 2.2) * tf(p.tend.drive);
+    const total = w3 + wm + wi;
+    const r = Math.random() * total;
+    const cat: Spot["cat"] = r < w3 ? "three" : r < w3 + wm ? "mid" : "inside";
     let cands = SPOTS.map((s, i) => i).filter((i) => SPOTS[i].cat === cat && !taken.has(i));
     if (!cands.length) cands = SPOTS.map((s, i) => i).filter((i) => !taken.has(i));
     p.spotIdx = pick(cands);
@@ -1079,52 +1055,19 @@ export class Game {
       return;
     }
 
-    const play = this.tactics[h.team].play;
-    const { focus, screener } = this.roles;
-    // get the play its touch: feed the iso man / post man when he's in position
-    if (play === "iso" && focus && h !== focus && sc > 6) {
-      if (
-        this.inFrontcourt(focus.pos, h.team) &&
-        this.openness(focus) > 3.5 &&
-        this.passRisk(h, focus.pos) < 0.6
-      ) {
-        this.tryPass(h, focus);
-        return;
+    const { focus, scorers } = this.roles;
+    // work the ball to the designated scoring options in priority order: feed
+    // the first one who's open in the frontcourt. the primary option gets the
+    // ball on a lighter window; lower options have to be more clearly open.
+    if (sc > 5) {
+      for (let i = 0; i < scorers.length; i++) {
+        const s = scorers[i];
+        if (s === h || !this.inFrontcourt(s.pos, h.team)) continue;
+        if (this.openness(s) > 3.2 + i * 1.3 && this.passRisk(h, s.pos) < 0.58) {
+          this.tryPass(h, s);
+          return;
+        }
       }
-    }
-    if (play === "post" && focus && h !== focus && sc > 5) {
-      const blockSpot = this.spotPos(h.team, {
-        ax: 4.5,
-        ay: focus.pos.y >= COURT.H / 2 ? 5.5 : -5.5,
-        cat: "inside",
-      });
-      if (dist(focus.pos, blockSpot) < 4 && this.passRisk(h, focus.pos) < 0.5) {
-        this.tryPass(h, focus);
-        return;
-      }
-    }
-    // post man backs his defender down once he has it deep
-    if (play === "post" && h === focus && dist(h.pos, hoop) < 13 && !h.driving) {
-      h.driving = true;
-      h.driveSide = h.pos.y >= COURT.H / 2 ? 1 : -1;
-      return;
-    }
-    // dribble hand-off: the handler dribbles right at the receiver and
-    // hands it off; the receiver attacks off the exchange
-    if (
-      play === "dho" &&
-      focus &&
-      h === this.roles.handler &&
-      h !== focus &&
-      sc > 4 &&
-      this.inFrontcourt(focus.pos, h.team)
-    ) {
-      if (dist(h.pos, focus.pos) > 3.2) {
-        h.moveTarget = { x: focus.pos.x, y: focus.pos.y };
-        return;
-      }
-      this.tryPass(h, focus, "handoff");
-      return;
     }
 
     const my = this.shotValue(h, h.pos);
@@ -1143,8 +1086,9 @@ export class Game {
       const risk = this.passRisk(h, m.pos);
       if (risk > 0.65) continue;
       v *= 1 - risk * 0.6;
-      // the roller is a live target out of the pick-and-roll
-      if (play === "pnr" && m === screener && m.rollTimer > 0) v += 0.3;
+      // lean toward the designated scoring options as kick/feed targets
+      const prio = scorers.indexOf(m);
+      if (prio >= 0) v += 0.18 - prio * 0.05;
       if (v > bestVal) {
         bestVal = v;
         best = m;
@@ -1174,8 +1118,10 @@ export class Game {
     if (lateGame && margin < 0) need *= margin <= -9 ? 0.7 : 0.85; // trailing: hurry
     if (lateGame && margin > 0 && gc < 60) need *= 1.3; // leading: slow it down
     if (breaking) need *= 0.8; // transition looks are good looks
-    // the play's star hunts his shot
-    if ((play === "iso" || play === "post") && h === focus) need *= 0.92;
+    // designated scorers hunt their shot — the higher the option, the harder
+    const myPrio = scorers.indexOf(h);
+    if (myPrio === 0) need *= 0.88;
+    else if (myPrio > 0) need *= 0.95;
 
     // numbers on the break: attack the rim before the defense loads up
     if (breaking && !h.driving) {
@@ -1196,7 +1142,8 @@ export class Game {
       return;
     }
     let driveGate = clamp(0.6 + (h.tend.drive - 50) * 0.008, 0.15, 0.95);
-    if ((play === "iso" || play === "post") && h === focus) driveGate = Math.min(0.95, driveGate + 0.25);
+    if (myPrio === 0) driveGate = Math.min(0.95, driveGate + 0.25);
+    else if (myPrio > 0) driveGate = Math.min(0.95, driveGate + 0.12);
     if (!h.driving && Math.random() < driveGate && dv + rand(-noise, noise) >= need * 0.9) {
       h.driving = true;
       h.driveSide = Math.random() < 0.5 ? -1 : 1;
@@ -1205,8 +1152,8 @@ export class Game {
     if (best && sc > 2.5) {
       let passBias =
         (bestVal > my.value + 0.03 ? 0.75 : 0.3) * clamp(0.5 + h.tend.pass * 0.01, 0.4, 1.5);
-      // the star holds the ball more in iso/post sets
-      if ((play === "iso" || play === "post") && h === focus) passBias *= 0.45;
+      // the primary option holds the ball more, working for his own shot
+      if (h === focus) passBias *= 0.45;
       if (Math.random() < passBias) {
         this.tryPass(h, best);
         return;
@@ -1760,86 +1707,32 @@ export class Game {
     if (this.lab && changed && p.team !== this.lab.team) this.labEnd();
   }
 
-  /** Choose who runs the called play for the team now on offense,
-      honoring explicit per-player assignments when present. */
+  /** Resolve the roles for the team now on offense from the chosen scoring
+      options. The primary option is the go-to scorer (`focus`); the best
+      on-ball creator brings it up (`handler`). */
   setRoles(team: number) {
     const ps = this.teams[team].players;
     const t = this.tactics[team];
-    const asn = t.assignments || [];
-    const bySlot = (role: PlayerAssignment) => {
-      const i = asn.findIndex((a) => a === role);
-      return i >= 0 && ps[i] ? ps[i] : null;
-    };
 
-    // fixed spacing spots for explicitly assigned players
+    // hold-spots are authored by dragging players, not by setRoles
     this.assignTargets.clear();
-    let cornerSide = -1,
-      wingSide = -1,
-      dunkSide = -1;
-    asn.forEach((a, i) => {
-      const p = ps[i];
-      if (!p || !a) return;
-      if (a === "corner") {
-        this.assignTargets.set(p.id, { ax: 1.5, ay: 20.5 * cornerSide, cat: "three" });
-        cornerSide *= -1;
-      } else if (a === "wing") {
-        this.assignTargets.set(p.id, { ax: 17, ay: 16 * wingSide, cat: "three" });
-        wingSide *= -1;
-      } else if (a === "top") {
-        this.assignTargets.set(p.id, { ax: 24.5, ay: 0, cat: "three" });
-      } else if (a === "dunker") {
-        this.assignTargets.set(p.id, { ax: 2.5, ay: 9 * dunkSide, cat: "inside" });
-        dunkSide *= -1;
-      }
-    });
 
-    // auto picks come from players without a fixed spacing job
-    const free = ps.filter((p) => !this.assignTargets.has(p.id));
-    const pool = free.length ? free : ps;
-    const focusPick = bySlot("focus") || (t.focusSlot != null ? ps[t.focusSlot] : null);
-    const handler =
-      bySlot("handler") ||
-      pool
-        .slice()
-        .sort(
-          (a, b) =>
-            b.ballHandle * 0.6 + b.iq * 0.2 + b.speed * 0.2 -
-            (a.ballHandle * 0.6 + a.iq * 0.2 + a.speed * 0.2)
-        )[0];
-    let screener: Player | null = null;
-    let focus: Player | null = focusPick;
-    if (t.play === "pnr") {
-      screener =
-        bySlot("screener") ||
-        (focusPick && focusPick !== handler
-          ? focusPick
-          : pool
-              .filter((p) => p !== handler)
-              .sort(
-                (a, b) =>
-                  b.heightIn * 1.5 + b.strength * 0.5 - (a.heightIn * 1.5 + a.strength * 0.5)
-              )[0] || null);
-      focus = null;
-    } else if (t.play === "iso" && !focus) {
-      focus = pool.slice().sort((a, b) => offThreat(b) - offThreat(a))[0];
-    } else if (t.play === "dho") {
-      // the hand-off receiver must be someone other than the handler
-      if (!focus || focus === handler) {
-        focus =
-          pool
-            .filter((p) => p !== handler)
-            .sort((a, b) => offThreat(b) - offThreat(a))[0] || null;
-      }
-    } else if (t.play === "post" && !focus) {
-      focus = pool
-        .slice()
-        .sort(
-          (a, b) =>
-            b.heightIn * 2 + b.strength * 0.5 + b.layup * 0.4 -
-            (a.heightIn * 2 + a.strength * 0.5 + a.layup * 0.4)
-        )[0];
-    }
-    this.roles = { handler, screener, focus };
+    // scoring options, in priority order, from the chosen roster slots
+    const scorers = (t.scorers || [])
+      .map((slot) => ps[slot])
+      .filter((p): p is Player => !!p);
+    const focus = scorers[0] || null;
+
+    // the best initiator brings the ball up and runs the offense
+    const handler = ps
+      .slice()
+      .sort(
+        (a, b) =>
+          b.ballHandle * 0.6 + b.iq * 0.2 + b.speed * 0.2 -
+          (a.ballHandle * 0.6 + a.iq * 0.2 + a.speed * 0.2)
+      )[0];
+
+    this.roles = { handler, screener: null, focus, scorers };
     this.annotate(team);
   }
 
@@ -1847,27 +1740,12 @@ export class Game {
   annotate(team: number) {
     for (const t of this.teams) for (const p of t.players) p.annotation = null;
     if (!this.lab || this.lab.team !== team) return;
-    const t = this.tactics[team];
-    const ps = this.teams[team].players;
-    const SPOT_LABELS: Partial<Record<PlayerAssignment, string>> = {
-      corner: "CORNER",
-      wing: "WING",
-      top: "TOP",
-      dunker: "DUNKER",
-    };
-    (t.assignments || []).forEach((a, i) => {
-      if (a && ps[i] && SPOT_LABELS[a]) ps[i].annotation = SPOT_LABELS[a]!;
+    const { handler, scorers } = this.roles;
+    const OPTION_LABELS = ["1ST", "2ND", "3RD"];
+    scorers.forEach((p, i) => {
+      if (p && i < OPTION_LABELS.length) p.annotation = OPTION_LABELS[i];
     });
-    const { handler, screener, focus } = this.roles;
-    if (focus && !focus.annotation) {
-      focus.annotation =
-        t.play === "iso" ? "ISO" : t.play === "post" ? "POST" : t.play === "dho" ? "DHO" : "GO-TO";
-    }
-    if (screener && !screener.annotation) screener.annotation = "SCREENER";
     if (handler && !handler.annotation) handler.annotation = "HANDLER";
-    if (t.play !== "motion") {
-      for (const p of ps) if (!p.annotation) p.annotation = "SPACE";
-    }
   }
 
   shotClockViolation() {
@@ -2047,45 +1925,34 @@ export class Game {
   }
 
   /* ---------- possession lab ---------- */
-  static PLAY_LABELS: Record<PlayCall, string> = {
-    motion: "motion offense",
-    iso: "an isolation",
-    pnr: "the pick-and-roll",
-    post: "a post-up",
-    dho: "a dribble hand-off",
-  };
   static SCHEME_LABELS: Record<DefScheme, string> = {
     man: "man-to-man",
     switch: "switch-everything",
     zone: "a 2-3 zone",
   };
 
-  /** Run a single scripted possession: offense runs `play`, defense
-      plays `defScheme`. Starts from a clean inbound formation — full
-      court (own baseline) or half court (frontcourt sideline). The
-      sim freezes when the possession ends. */
+  /** Run a single scripted possession: the offense looks to score through
+      its chosen options against `defScheme`. Starts from a clean inbound
+      formation — full court (own baseline) or half court (frontcourt
+      sideline). The sim freezes when the possession ends. */
   runPossession(opts: {
     offense: number;
-    play: PlayCall;
     defScheme: DefScheme;
-    focusSlot?: number | null;
+    scorers?: number[];
     start?: InboundLoc;
-    assignments?: (PlayerAssignment | null)[];
     inbounderSlot?: number | null;
   }) {
     if (this.over) return;
     this.lab = { team: opts.offense };
     this.frozen = false;
     this.labPending = null;
-    this.tactics[opts.offense].play = opts.play;
-    this.tactics[opts.offense].focusSlot = opts.focusSlot ?? null;
-    this.tactics[opts.offense].assignments = opts.assignments;
+    this.tactics[opts.offense].scorers = opts.scorers ?? [];
     this.tactics[opts.offense].inbounderSlot = opts.inbounderSlot ?? null;
     this.tactics[1 - opts.offense].defScheme = opts.defScheme;
     if (this.gameClock < 35) this.gameClock = 35; // room to run the play
     this.emit(
       "info",
-      `LAB — ${this.teams[opts.offense].name} run ${Game.PLAY_LABELS[opts.play]} against ${Game.SCHEME_LABELS[opts.defScheme]}`,
+      `LAB — ${this.teams[opts.offense].name} possession against ${Game.SCHEME_LABELS[opts.defScheme]}`,
       null
     );
     const spot = this.labInboundSpot(opts.offense, opts.start ?? "full");
@@ -2107,51 +1974,62 @@ export class Game {
       }
     }
     this.ballFollow();
-    // seed editable arrows for the players the play moves; the rest open clean
-    this.labDefaultPaths(opts.offense, opts.play);
-  }
-
-  /** Default motion routes for a scripted possession — an editable path only
-      for the players the play actually moves (the screener's roll, the go-to
-      guy's cut, anyone given a fixed spot). The ball-handler drives and the
-      supporting cast just spaces, so they open with no arrow and flow with the
-      offense. Re-run whenever the play (re)stages. */
-  labDefaultPaths(team: number, play: PlayCall) {
-    const ps = this.teams[team].players;
-    const { handler, screener, focus } = this.roles;
-    const hoop = this.hoops[team];
-    const rim = this.spotPos(team, { ax: 3, ay: 0, cat: "inside" });
-    ps.forEach((p) => {
+    // every route opens clean — the user authors the motion paths by hand
+    for (const p of this.teams[opts.offense].players) {
       p.path = null;
       p.pathIdx = 0;
       p.pathHold = true;
-      if (p === handler) return; // he'll have the ball
-      const side = p.pos.y >= COURT.H / 2 ? 1 : -1;
-      const route: Vec[] = [{ x: p.pos.x, y: p.pos.y }];
-      const fixed = this.assignTargets.get(p.id);
-      if (fixed && p !== screener && p !== focus) {
-        route.push(this.spotPos(team, fixed));
-      } else if (play === "pnr" && p === screener && handler) {
-        // climb up to screen the handler, then roll hard to the rim
-        route.push({
-          x: handler.pos.x + (hoop.x - handler.pos.x) * 0.12,
-          y: handler.pos.y + side * 2,
-        });
-        route.push(rim);
-      } else if (p === focus && play === "post") {
-        route.push(this.spotPos(team, { ax: 4.5, ay: side * 5.5, cat: "inside" }));
-      } else if (p === focus && play === "iso") {
-        route.push(this.spotPos(team, { ax: 24.5, ay: 0, cat: "three" }));
-      } else if (p === focus && play === "dho") {
-        // come off toward the handoff, then turn the corner to the rim
-        route.push(this.spotPos(team, { ax: 17, ay: side * 14, cat: "three" }));
-        route.push(rim);
-      }
-      if (route.length >= 2) {
-        p.path = route;
-        p.pathIdx = 0;
-      }
-    });
+    }
+  }
+
+  /** Snapshot the staged play — every player's spot and authored route, the
+      dragged hold-spots, and the inbound — so the exact same possession can be
+      run again. Call while the formation is frozen, just before it runs. */
+  labCaptureSetup(): LabSetup {
+    return {
+      players: this.teams.flatMap((t) =>
+        t.players.map((p) => ({
+          team: p.team,
+          slot: p.slot,
+          pos: { ...p.pos },
+          moveTarget: p.moveTarget ? { ...p.moveTarget } : null,
+          path: p.path ? p.path.map((v) => ({ ...v })) : null,
+          pathHold: p.pathHold,
+        }))
+      ),
+      assignTargets: [...this.assignTargets.entries()].map(([id, s]) => [id, { ...s }]),
+      inbSpot: this.inb ? { ...this.inb.spot } : { ...this.ball.pos },
+      inbounderSlot: this.inb ? this.inb.inbounder.slot : 0,
+      labTeam: this.lab ? this.lab.team : this.possession,
+      gameClock: this.gameClock,
+    };
+  }
+
+  /** Restage a captured play to run it again exactly: rebuild the inbound,
+      then drop every player back on his authored spot with his route reset
+      to the top. Outcomes still vary — only the design is replayed. */
+  labReplaySetup(snap: LabSetup) {
+    this.over = false;
+    this.lab = { team: snap.labTeam };
+    this.frozen = false;
+    this.labPending = null;
+    this.gameClock = Math.max(35, snap.gameClock);
+    // pin the same inbounder so the exact play replays (auto-pick would
+    // otherwise re-resolve against wherever everyone ended up)
+    this.tactics[snap.labTeam].inbounderSlot = snap.inbounderSlot;
+    this.setupInbound(snap.labTeam, { ...snap.inbSpot }, { sc: 24 });
+    for (const f of snap.players) {
+      const p = this.teams[f.team].players[f.slot];
+      p.pos = { ...f.pos };
+      p.vel = { x: 0, y: 0 };
+      p.moveTarget = f.moveTarget ? { ...f.moveTarget } : null;
+      p.path = f.path ? f.path.map((v) => ({ ...v })) : null;
+      p.pathIdx = 0;
+      p.pathHold = f.pathHold;
+    }
+    // restore the dragged hold-spots (setupInbound clears them via setRoles)
+    this.assignTargets = new Map(snap.assignTargets.map(([id, s]) => [id, { ...s }]));
+    this.ballFollow();
   }
 
   /** Swap the defensive scheme on a staged possession without disturbing the
@@ -2208,8 +2086,8 @@ export class Game {
     this.lab = null;
     this.frozen = false;
     this.tactics = [
-      { play: "motion", defScheme: "man", focusSlot: null, inbounderSlot: null },
-      { play: "motion", defScheme: "man", focusSlot: null, inbounderSlot: null },
+      { defScheme: "man", scorers: [], inbounderSlot: null },
+      { defScheme: "man", scorers: [], inbounderSlot: null },
     ];
     if (this.labPending) {
       const { team, spot, sc } = this.labPending;

@@ -39,9 +39,6 @@ export interface Tendencies {
   gamble: number;
 }
 
-/** Offensive play call for a possession. */
-export type PlayCall = "motion" | "iso" | "pnr" | "post" | "dho";
-
 /** Defensive scheme for a possession. */
 export type DefScheme = "man" | "switch" | "zone";
 
@@ -55,23 +52,12 @@ export type InboundLoc =
   | "base-top"
   | "base-bot";
 
-/** A job given to one offensive player for a scripted possession. */
-export type PlayerAssignment =
-  | "handler"
-  | "screener"
-  | "focus"
-  | "corner"
-  | "wing"
-  | "top"
-  | "dunker";
-
 export interface Tactics {
-  play: PlayCall;
   defScheme: DefScheme;
-  /** roster slot the play runs through (iso/post/pnr screener); null = auto */
-  focusSlot: number | null;
-  /** per-roster-slot jobs (lab mode); null/missing = auto */
-  assignments?: (PlayerAssignment | null)[];
+  /** offensive roster slots to score through, in priority order (lab mode).
+      first = primary option, then secondary, tertiary. [] = no designated
+      scorer (the offense just flows). */
+  scorers: number[];
   /** roster slot that throws the inbound (lab mode); null/missing = auto */
   inbounderSlot?: number | null;
 }
