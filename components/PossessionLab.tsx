@@ -1,11 +1,14 @@
 "use client";
 /* ============================================================
-   PossessionLab — script a single possession in a sandboxed
-   game (the real game is untouched): pick the play, the
-   coverage, where the inbound starts, and a job for each
-   player. The sandbox freezes when the possession ends.
+   PossessionLab — interactive play designer on a sandboxed game.
+   Picking a play / defense / start instantly stages the players
+   into their formation on the court. While staged you can drag
+   players, draw motion paths, and hand out roles; Run plays the
+   possession and freezes when it ends. The real game is paused
+   and untouched the whole time.
    ============================================================ */
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { MousePointer2, PenLine, Eraser } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -16,13 +19,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import type { BoxTeam, PossessionOpts, Snapshot } from "@/hooks/useGame";
+import type { BoxTeam, LabPhase, LabTool, PossessionOpts, Snapshot } from "@/hooks/useGame";
 import type { DefScheme, PlayCall, PlayerAssignment, SimEvent } from "@/lib/types";
 
 const PLAYS: { value: PlayCall; label: string; blurb: string }[] = [
   { value: "motion", label: "Motion", blurb: "free-flowing offense, everyone hunts a spot" },
-  { value: "iso", label: "Isolation", blurb: "clear out and let the star go to work" },
+  { value: "iso", label: "Isolation", blurb: "clear out and let the go-to guy work" },
   { value: "pnr", label: "Pick & roll", blurb: "screen for the handler, roll to the rim" },
+  { value: "dho", label: "Dribble hand-off", blurb: "dribble at the receiver, hand it off, attack" },
   { value: "post", label: "Post-up", blurb: "feed the big on the block" },
 ];
 
@@ -47,11 +51,24 @@ interface PossessionLabProps {
   teams: BoxTeam[];
   snapshot: Snapshot;
   events: SimEvent[];
-  onRun: (opts: PossessionOpts) => void;
-  onResume: () => void;
+  labPhase: LabPhase;
+  labTool: LabTool;
+  onStage: (opts: PossessionOpts) => void;
+  onRun: () => void;
+  onToolChange: (t: LabTool) => void;
+  onClearPaths: () => void;
 }
 
-export function PossessionLab({ teams, snapshot, events, onRun, onResume }: PossessionLabProps) {
+export function PossessionLab({
+  teams,
+  events,
+  labPhase,
+  labTool,
+  onStage,
+  onRun,
+  onToolChange,
+  onClearPaths,
+}: PossessionLabProps) {
   const [offense, setOffense] = useState(0);
   const [play, setPlay] = useState<PlayCall>("pnr");
   const [scheme, setScheme] = useState<DefScheme>("man");
@@ -59,6 +76,18 @@ export function PossessionLab({ teams, snapshot, events, onRun, onResume }: Poss
   const [assignments, setAssignments] = useState<(PlayerAssignment | "auto")[]>(
     Array(5).fill("auto")
   );
+  const [rev, setRev] = useState(0); // bump to re-stage with same options
+
+  // any change to the script instantly re-stages the formation
+  useEffect(() => {
+    onStage({
+      offense,
+      play,
+      defScheme: scheme,
+      start,
+      assignments: assignments.map((a) => (a === "auto" ? null : a)),
+    });
+  }, [offense, play, scheme, start, assignments, rev, onStage]);
 
   if (teams.length < 2) return null;
   const offTeam = teams[offense];
@@ -68,7 +97,7 @@ export function PossessionLab({ teams, snapshot, events, onRun, onResume }: Poss
   const setAssignment = (slot: number, v: PlayerAssignment | "auto") => {
     setAssignments((prev) => {
       const next = [...prev];
-      // unique roles: claiming handler/screener/focus releases it elsewhere
+      // unique roles: claiming handler/screener/go-to releases it elsewhere
       if (v === "handler" || v === "screener" || v === "focus") {
         for (let i = 0; i < next.length; i++) if (next[i] === v) next[i] = "auto";
       }
@@ -79,90 +108,87 @@ export function PossessionLab({ teams, snapshot, events, onRun, onResume }: Poss
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-sm text-muted-foreground">
-        Script one possession in a sandbox — the real game is paused and untouched. Pick the
-        play, the coverage, and a job for each player, then watch it unfold.
-      </p>
-
-      <div className="flex flex-col gap-1.5">
-        <Label>Offense</Label>
-        <div className="flex gap-1.5">
-          {teams.map((t, ti) => (
+      <div className="grid grid-cols-2 gap-3">
+        <div className="flex flex-col gap-1.5">
+          <Label>Offense</Label>
+          <div className="flex gap-1.5">
+            {teams.map((t, ti) => (
+              <Button
+                key={ti}
+                size="sm"
+                variant={offense === ti ? "secondary" : "outline"}
+                onClick={() => {
+                  setOffense(ti);
+                  setAssignments(Array(5).fill("auto"));
+                }}
+              >
+                <span className="mr-1.5 size-2.5 rounded-full" style={{ background: t.color }} />
+                {t.name.split(" ")[0]}
+              </Button>
+            ))}
+          </div>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label>Inbound</Label>
+          <div className="flex gap-1.5">
             <Button
-              key={ti}
               size="sm"
-              variant={offense === ti ? "secondary" : "outline"}
-              onClick={() => {
-                setOffense(ti);
-                setAssignments(Array(5).fill("auto"));
-              }}
+              variant={start === "half" ? "secondary" : "outline"}
+              onClick={() => setStart("half")}
             >
-              <span className="mr-1.5 size-2.5 rounded-full" style={{ background: t.color }} />
-              {t.name}
+              Half court
             </Button>
-          ))}
+            <Button
+              size="sm"
+              variant={start === "full" ? "secondary" : "outline"}
+              onClick={() => setStart("full")}
+            >
+              Full court
+            </Button>
+          </div>
         </div>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <Label>Inbound from</Label>
-        <div className="flex gap-1.5">
-          <Button
-            size="sm"
-            variant={start === "half" ? "secondary" : "outline"}
-            onClick={() => setStart("half")}
-          >
-            Half court (sideline)
-          </Button>
-          <Button
-            size="sm"
-            variant={start === "full" ? "secondary" : "outline"}
-            onClick={() => setStart("full")}
-          >
-            Full court (baseline)
-          </Button>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="flex flex-col gap-1.5">
+          <Label>Play call</Label>
+          <Select value={play} onValueChange={(v) => setPlay(v as PlayCall)}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PLAYS.map((p) => (
+                <SelectItem key={p.value} value={p.value}>
+                  {p.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">{playMeta.blurb}</p>
         </div>
-      </div>
-
-      <div className="flex flex-col gap-1.5">
-        <Label>Play call</Label>
-        <Select value={play} onValueChange={(v) => setPlay(v as PlayCall)}>
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {PLAYS.map((p) => (
-              <SelectItem key={p.value} value={p.value}>
-                {p.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">{playMeta.blurb}</p>
-      </div>
-
-      <div className="flex flex-col gap-1.5">
-        <Label>Defense ({teams[1 - offense].name})</Label>
-        <Select value={scheme} onValueChange={(v) => setScheme(v as DefScheme)}>
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {SCHEMES.map((s) => (
-              <SelectItem key={s.value} value={s.value}>
-                {s.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">{schemeMeta.blurb}</p>
+        <div className="flex flex-col gap-1.5">
+          <Label>Defense</Label>
+          <Select value={scheme} onValueChange={(v) => setScheme(v as DefScheme)}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SCHEMES.map((s) => (
+                <SelectItem key={s.value} value={s.value}>
+                  {s.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">{schemeMeta.blurb}</p>
+        </div>
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Player jobs</Label>
+        <Label>Roles ({offTeam.name})</Label>
         {offTeam.players.map((bp, slot) => (
           <div key={bp.id} className="flex items-center gap-2">
-            <span className="w-36 truncate text-sm">
+            <span className="w-32 truncate text-sm">
               #{bp.number} {bp.name.split(" ").slice(-1)[0]}
             </span>
             <Select
@@ -182,38 +208,57 @@ export function PossessionLab({ teams, snapshot, events, onRun, onResume }: Poss
             </Select>
           </div>
         ))}
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label>Court tools</Label>
+        <div className="flex gap-1.5">
+          <Button
+            size="sm"
+            variant={labTool === "move" ? "secondary" : "outline"}
+            onClick={() => onToolChange("move")}
+            disabled={labPhase !== "staged"}
+          >
+            <MousePointer2 className="mr-1.5 size-3.5" /> Move
+          </Button>
+          <Button
+            size="sm"
+            variant={labTool === "path" ? "secondary" : "outline"}
+            onClick={() => onToolChange("path")}
+            disabled={labPhase !== "staged"}
+          >
+            <PenLine className="mr-1.5 size-3.5" /> Draw path
+          </Button>
+          <Button size="sm" variant="outline" onClick={onClearPaths} disabled={labPhase !== "staged"}>
+            <Eraser className="mr-1.5 size-3.5" /> Clear paths
+          </Button>
+        </div>
         <p className="text-xs text-muted-foreground">
-          Jobs are drawn on the court next to each player during the possession.
+          {labPhase === "staged"
+            ? labTool === "move"
+              ? "Drag any player to set his starting spot."
+              : "Drag from an offensive player to draw the route he'll run."
+            : labPhase === "running"
+              ? "Play in progress — watch the court."
+              : "Possession over — reset to tweak it and run it back."}
         </p>
       </div>
 
       <div className="flex gap-2">
-        <Button
-          onClick={() =>
-            onRun({
-              offense,
-              play,
-              defScheme: scheme,
-              start,
-              assignments: assignments.map((a) => (a === "auto" ? null : a)),
-            })
-          }
-        >
-          {snapshot.labActive ? "Run it again" : "Run possession"}
+        <Button onClick={onRun} disabled={labPhase !== "staged"}>
+          Run play
         </Button>
-        {snapshot.labActive && (
-          <Button variant="outline" onClick={onResume}>
-            Back to game
-          </Button>
-        )}
+        <Button variant="outline" onClick={() => setRev((r) => r + 1)}>
+          Reset formation
+        </Button>
       </div>
 
-      {snapshot.labActive && (
+      {(labPhase === "running" || labPhase === "ended") && (
         <div className="flex flex-col gap-1.5">
           <Label>Possession play-by-play</Label>
           <div className="flex flex-col rounded-md border">
             {events.length === 0 && (
-              <div className="px-3 py-2 text-sm text-muted-foreground">Setting it up…</div>
+              <div className="px-3 py-2 text-sm text-muted-foreground">Ball is in…</div>
             )}
             {events.map((e, i) => (
               <div

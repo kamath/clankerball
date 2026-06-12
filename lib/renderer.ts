@@ -4,8 +4,8 @@
    ============================================================ */
 import { COURT, type Game } from "./engine";
 
-const SCALE = 10; // px per foot
-const PAD = 32; // out-of-bounds apron in px
+export const SCALE = 10; // px per foot
+export const PAD = 32; // out-of-bounds apron in px
 
 export class Renderer {
   cv: HTMLCanvasElement;
@@ -189,6 +189,39 @@ export class Renderer {
     const c = this.ctx;
     c.clearRect(0, 0, this.W, this.H);
     if (this.courtLayer) c.drawImage(this.courtLayer, 0, 0);
+
+    // lab mode: authored motion paths, drawn under the players
+    if (game.lab) {
+      for (let ti = 0; ti < 2; ti++) {
+        for (const p of game.teams[ti].players) {
+          if (!p.path || p.path.length < 2) continue;
+          c.save();
+          c.strokeStyle = this.hexA(this.colors[ti] || "#ffffff", 0.8);
+          c.lineWidth = 2.5;
+          c.setLineDash([7, 6]);
+          c.beginPath();
+          c.moveTo(this.px(p.path[0].x), this.py(p.path[0].y));
+          for (let i = 1; i < p.path.length; i++) {
+            c.lineTo(this.px(p.path[i].x), this.py(p.path[i].y));
+          }
+          c.stroke();
+          c.setLineDash([]);
+          // arrowhead at the end of the route
+          const a = p.path[p.path.length - 2];
+          const b = p.path[p.path.length - 1];
+          const ang = Math.atan2(b.y - a.y, b.x - a.x);
+          const bx = this.px(b.x),
+            by = this.py(b.y);
+          c.beginPath();
+          c.moveTo(bx, by);
+          c.lineTo(bx - 9 * Math.cos(ang - 0.45), by - 9 * Math.sin(ang - 0.45));
+          c.moveTo(bx, by);
+          c.lineTo(bx - 9 * Math.cos(ang + 0.45), by - 9 * Math.sin(ang + 0.45));
+          c.stroke();
+          c.restore();
+        }
+      }
+    }
 
     // players
     for (let ti = 0; ti < 2; ti++) {

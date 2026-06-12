@@ -6,8 +6,8 @@
    so 60fps rendering never depends on React re-renders.
    ============================================================ */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Game, fmtClock } from "@/lib/engine";
-import { Renderer } from "@/lib/renderer";
+import { COURT, Game, fmtClock } from "@/lib/engine";
+import { PAD, Renderer, SCALE } from "@/lib/renderer";
 import type {
   DefScheme,
   GameConfig,
@@ -15,7 +15,11 @@ import type {
   Player,
   PlayerAssignment,
   SimEvent,
+  Vec,
 } from "@/lib/types";
+
+export type LabPhase = "idle" | "staged" | "running" | "ended";
+export type LabTool = "move" | "path";
 
 export interface Snapshot {
   scores: [number, number];
@@ -71,6 +75,8 @@ export function useGame(initialConfig: GameConfig) {
   const labGameRef = useRef<Game | null>(null);
   const modeRef = useRef<"game" | "lab">("game");
   const labReadyRef = useRef(false);
+  const labPhaseRef = useRef<LabPhase>("idle");
+  const labToolRef = useRef<LabTool>("move");
   const rendererRef = useRef<Renderer | null>(null);
   const configRef = useRef<GameConfig>(initialConfig);
   const playingRef = useRef(true);
@@ -80,6 +86,8 @@ export function useGame(initialConfig: GameConfig) {
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [events, setEvents] = useState<SimEvent[]>([]);
   const [labEvents, setLabEvents] = useState<SimEvent[]>([]);
+  const [labPhase, setLabPhaseState] = useState<LabPhase>("idle");
+  const [labTool, setLabToolState] = useState<LabTool>("move");
   const [boxTeams, setBoxTeams] = useState<BoxTeam[]>([]);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeedState] = useState(2);
@@ -121,6 +129,8 @@ export function useGame(initialConfig: GameConfig) {
       // a new game always exits the lab
       modeRef.current = "game";
       labGameRef.current = null;
+      labPhaseRef.current = "idle";
+      setLabPhaseState("idle");
       setLabEvents([]);
       rendererRef.current?.setTeams([cfg.teamA.color, cfg.teamB.color]);
       setSnapshot(sampleSnapshot(game));
@@ -138,6 +148,88 @@ export function useGame(initialConfig: GameConfig) {
     rendererRef.current = new Renderer(canvasRef.current);
     newGame(configRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Lab editing: drag players / draw motion paths on the staged court.
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+    let dragP: Player | null = null;
+    let pathP: Player | null = null;
+    let pts: Vec[] = [];
+
+    const toCourt = (e: PointerEvent): Vec => {
+      const rect = cv.getBoundingClientRect();
+      const lw = COURT.W * SCALE + PAD * 2;
+      const lh = COURT.H * SCALE + PAD * 2;
+      return {
+        x: (((e.clientX - rect.left) / rect.width) * lw - PAD) / SCALE,
+        y: (((e.clientY - rect.top) / rect.height) * lh - PAD) / SCALE,
+      };
+    };
+
+    const down = (e: PointerEvent) => {
+      const lab = labGameRef.current;
+      if (modeRef.current !== "lab" || !lab || labPhaseRef.current !== "staged") return;
+      const c = toCourt(e);
+      let best: Player | null = null,
+        bd = 2.6;
+      for (const p of lab.allPlayers()) {
+        const d = Math.hypot(p.pos.x - c.x, p.pos.y - c.y);
+        if (d < bd) {
+          bd = d;
+          best = p;
+        }
+      }
+      if (!best) return;
+      e.preventDefault();
+      cv.setPointerCapture(e.pointerId);
+      if (labToolRef.current === "path") {
+        if (best.team !== lab.possession) return; // routes are for the offense
+        pathP = best;
+        pts = [{ x: best.pos.x, y: best.pos.y }];
+        best.path = pts;
+        best.pathIdx = 0;
+      } else {
+        dragP = best;
+      }
+    };
+
+    const move = (e: PointerEvent) => {
+      if (dragP) {
+        const c = toCourt(e);
+        dragP.pos.x = clamp(c.x, -2.5, COURT.W + 2.5);
+        dragP.pos.y = clamp(c.y, -2.5, COURT.H + 2.5);
+        dragP.vel = { x: 0, y: 0 };
+      } else if (pathP) {
+        const c = toCourt(e);
+        const last = pts[pts.length - 1];
+        if (Math.hypot(c.x - last.x, c.y - last.y) > 2) {
+          pts.push({ x: clamp(c.x, 1, COURT.W - 1), y: clamp(c.y, 1, COURT.H - 1) });
+        }
+      }
+    };
+
+    const up = () => {
+      const lab = labGameRef.current;
+      if (dragP && lab) lab.setHoldSpot(dragP);
+      if (pathP && pts.length < 2) pathP.path = null; // a tap, not a route
+      dragP = null;
+      pathP = null;
+      pts = [];
+    };
+
+    cv.addEventListener("pointerdown", down);
+    cv.addEventListener("pointermove", move);
+    cv.addEventListener("pointerup", up);
+    cv.addEventListener("pointercancel", up);
+    return () => {
+      cv.removeEventListener("pointerdown", down);
+      cv.removeEventListener("pointermove", move);
+      cv.removeEventListener("pointerup", up);
+      cv.removeEventListener("pointercancel", up);
+    };
   }, []);
 
   // The animation + simulation loop.
@@ -162,6 +254,11 @@ export function useGame(initialConfig: GameConfig) {
           game.step(s);
           sim -= s;
         }
+      }
+      // the lab possession just ended (engine froze itself)
+      if (inLab && game.frozen && labPhaseRef.current === "running") {
+        labPhaseRef.current = "ended";
+        setLabPhaseState("ended");
       }
       renderer.draw(game, real);
 
@@ -191,36 +288,73 @@ export function useGame(initialConfig: GameConfig) {
     setSpeedState(s);
   }, []);
 
-  /** Lab mode: build a fresh sandboxed game (real game untouched) and
-      run one scripted possession in it; the sandbox freezes at the end. */
-  const runPossession = useCallback(
+  const setLabPhase = useCallback((p: LabPhase) => {
+    labPhaseRef.current = p;
+    setLabPhaseState(p);
+  }, []);
+
+  /** Stage a possession in a fresh sandboxed game (real game untouched):
+      players snap into formation and the scene freezes for editing —
+      drag players, draw paths — until runLab() lets it play. */
+  const stageLab = useCallback(
     (opts: PossessionOpts) => {
-      labReadyRef.current = false; // mute the sandbox's tip-off chatter
+      labReadyRef.current = false; // mute events until the play actually runs
       const lab = new Game(configRef.current, {
         onEvent: (e) => {
           if (!labReadyRef.current) return;
           setLabEvents((prev) => (prev.length > 100 ? [e, ...prev.slice(0, 100)] : [e, ...prev]));
         },
       });
+      lab.runPossession(opts);
+      lab.frozen = true; // staged: hold the formation for editing
       labGameRef.current = lab;
       setLabEvents([]);
-      labReadyRef.current = true;
-      lab.runPossession(opts);
       modeRef.current = "lab";
+      setLabPhase("staged");
       playingRef.current = true;
       setPlaying(true);
       setSnapshot(sampleSnapshot(lab));
     },
-    [sampleSnapshot]
+    [sampleSnapshot, setLabPhase]
   );
 
+  /** Let the staged possession play out. */
+  const runLab = useCallback(() => {
+    const lab = labGameRef.current;
+    if (!lab || labPhaseRef.current !== "staged") return;
+    labReadyRef.current = true;
+    lab.frozen = false;
+    setLabPhase("running");
+    playingRef.current = true;
+    setPlaying(true);
+  }, [setLabPhase]);
+
+  /** Erase all authored motion paths on the staged formation. */
+  const clearLabPaths = useCallback(() => {
+    const lab = labGameRef.current;
+    if (!lab) return;
+    for (const t of lab.teams) {
+      for (const p of t.players) {
+        p.path = null;
+        p.pathIdx = 0;
+      }
+    }
+  }, []);
+
+  const setLabTool = useCallback((t: LabTool) => {
+    labToolRef.current = t;
+    setLabToolState(t);
+  }, []);
+
   /** Leave the lab; the real game continues exactly where it was. */
-  const resumeGame = useCallback(() => {
+  const exitLab = useCallback(() => {
     modeRef.current = "game";
     labGameRef.current = null;
+    setLabPhase("idle");
+    setLabEvents([]);
     const game = gameRef.current;
     if (game) setSnapshot(sampleSnapshot(game));
-  }, [sampleSnapshot]);
+  }, [sampleSnapshot, setLabPhase]);
 
   /** Mutate a live player's field in place (engine reads the same object). */
   const editPlayer = useCallback((teamIdx: number, slot: number, mutate: (p: Player) => void) => {
@@ -239,6 +373,8 @@ export function useGame(initialConfig: GameConfig) {
     snapshot,
     events,
     labEvents,
+    labPhase,
+    labTool,
     boxTeams,
     playing,
     speed,
@@ -247,8 +383,11 @@ export function useGame(initialConfig: GameConfig) {
     togglePlay,
     setSpeed,
     editPlayer,
-    runPossession,
-    resumeGame,
+    stageLab,
+    runLab,
+    exitLab,
+    clearLabPaths,
+    setLabTool,
     getConfig: () => configRef.current,
   };
 }

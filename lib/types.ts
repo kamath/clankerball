@@ -40,7 +40,7 @@ export interface Tendencies {
 }
 
 /** Offensive play call for a possession. */
-export type PlayCall = "motion" | "iso" | "pnr" | "post";
+export type PlayCall = "motion" | "iso" | "pnr" | "post" | "dho";
 
 /** Defensive scheme for a possession. */
 export type DefScheme = "man" | "switch" | "zone";
@@ -140,6 +140,9 @@ export interface Player extends Ratings {
   zoneIdx: number;
   /** role label drawn on the court during lab possessions */
   annotation: string | null;
+  /** lab-authored motion path: waypoints followed when the play runs */
+  path: Vec[] | null;
+  pathIdx: number;
   stats: PlayerStats;
 }
 

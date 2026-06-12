@@ -165,7 +165,8 @@ export type PassType =
   | "hitAhead"
   | "pocket"
   | "kickout"
-  | "noLook";
+  | "noLook"
+  | "handoff";
 
 type PassLineFn = (p: string, c: string) => string;
 const PASS_LINES: Record<PassType, PassLineFn[]> = {
@@ -209,6 +210,10 @@ const PASS_LINES: Record<PassType, PassLineFn[]> = {
   noLook: [
     (p, c) => `${p} drops a no-look dime to ${c}`,
     (p, c) => `${p} finds ${c} without even looking`,
+  ],
+  handoff: [
+    (p, c) => `${p} hands it off to ${c}`,
+    (p, c) => `${p} dribbles into the hand-off with ${c}`,
   ],
 };
 
@@ -284,6 +289,9 @@ export class Game {
   frozen = false;
   /** inbound deferred by a lab freeze, replayed on resume */
   labPending: { team: number; spot: Vec; sc: number } | null = null;
+  /** jump-ball state: game and OT periods open with a tip, not an inbound */
+  tipoff = false;
+  jumpers: Player[] = [];
 
   constructor(cfg: GameConfig, opts: GameOpts = {}) {
     this.onEvent = opts.onEvent || (() => {});
@@ -319,8 +327,8 @@ export class Game {
     ];
     this.roles = { handler: null, screener: null, focus: null };
     this.screen = null;
-    this.emit("period", `Tip-off! The ${this.teams[this.possession].name} start with the ball`, null);
-    this.setupInbound(this.possession, this.baselineSpot(this.possession), { sc: 24 });
+    this.emit("period", `Tip-off! Jump ball at center court`, null);
+    this.setupTipoff();
   }
 
   makePlayer(cfg: PlayerConfig, team: number, slot: number): Player {
@@ -347,6 +355,8 @@ export class Game {
       rollTimer: 0,
       zoneIdx: -1,
       annotation: null,
+      path: null,
+      pathIdx: 0,
       stats: { pts: 0, fgm: 0, fga: 0, tpm: 0, tpa: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0 },
     } as Player;
   }
@@ -483,17 +493,21 @@ export class Game {
   step(dt: number) {
     if (this.over || this.frozen) return;
     if (this.phase === "setup") {
-      this.updateDefense();
+      if (!this.tipoff) this.updateDefense();
       this.moveAll(dt);
       this.ballFollow();
       this.deadTimer -= dt;
-      // don't throw it in until the inbounder is actually standing at
-      // the out-of-bounds spot (with a forced release as a backstop)
-      if (
-        this.deadTimer <= 0 &&
-        (dist(this.inb.inbounder.pos, this.inb.spot) < 2 || this.deadTimer < -4)
-      ) {
-        this.releaseInbound();
+      if (this.deadTimer <= 0) {
+        if (this.tipoff) {
+          this.resolveTipoff();
+        } else if (
+          // don't throw it in until the inbounder is actually standing
+          // at the out-of-bounds spot (forced release as a backstop)
+          dist(this.inb.inbounder.pos, this.inb.spot) < 2 ||
+          this.deadTimer < -4
+        ) {
+          this.releaseInbound();
+        }
       }
       return;
     }
@@ -612,6 +626,16 @@ export class Game {
         p.moveTarget = { ...this.ball.flight.to };
         continue;
       }
+      if (p.path && p.path.length) {
+        // lab-authored motion path: run the waypoints, then hold the end
+        if (p.pathIdx < p.path.length) {
+          p.moveTarget = { ...p.path[p.pathIdx] };
+          if (dist(p.pos, p.path[p.pathIdx]) < 2) p.pathIdx++;
+        } else {
+          p.moveTarget = { ...p.path[p.path.length - 1] };
+        }
+        continue;
+      }
       if (p.rollTimer > 0) {
         // screener rolling hard to the rim
         p.rollTimer -= dt;
@@ -645,6 +669,12 @@ export class Game {
     if (play === "post" && p === focus) {
       const side = p.pos.y >= COURT.H / 2 ? 1 : -1;
       p.moveTarget = this.spotPos(p.team, { ax: 4.5, ay: side * 5.5, cat: "inside" });
+      return true;
+    }
+    if (play === "dho" && p === focus && holder === this.roles.handler) {
+      // wait on the wing for the handler to dribble into the hand-off
+      const side = p.pos.y >= COURT.H / 2 ? 1 : -1;
+      p.moveTarget = this.spotPos(p.team, { ax: 17, ay: 14 * side, cat: "three" });
       return true;
     }
     if (play === "pnr" && p === screener && holder === this.roles.handler && holder) {
@@ -1049,6 +1079,23 @@ export class Game {
       h.driveSide = h.pos.y >= COURT.H / 2 ? 1 : -1;
       return;
     }
+    // dribble hand-off: the handler dribbles right at the receiver and
+    // hands it off; the receiver attacks off the exchange
+    if (
+      play === "dho" &&
+      focus &&
+      h === this.roles.handler &&
+      h !== focus &&
+      sc > 4 &&
+      this.inFrontcourt(focus.pos, h.team)
+    ) {
+      if (dist(h.pos, focus.pos) > 3.2) {
+        h.moveTarget = { x: focus.pos.x, y: focus.pos.y };
+        return;
+      }
+      this.tryPass(h, focus, "handoff");
+      return;
+    }
 
     const my = this.shotValue(h, h.pos);
     const teamFga = this.teams[h.team].players.reduce((s, q) => s + q.stats.fga, 0);
@@ -1437,6 +1484,15 @@ export class Game {
     } else if (f.passer) {
       const line = pick(PASS_LINES[f.passType || "chest"])(f.passer.name, f.catcher!.name);
       this.emit("pass", line, f.passer.team);
+      if (f.passType === "handoff") {
+        // the exchange acts like a screen: receiver turns the corner,
+        // the handler rolls out of it
+        const recv = f.catcher!;
+        this.screen = { timer: 1.0, screener: f.passer, handler: recv };
+        f.passer.rollTimer = 2.2;
+        recv.driving = true;
+        recv.driveSide = recv.pos.y >= COURT.H / 2 ? -1 : 1; // turn toward the middle
+      }
     }
   }
 
@@ -1661,6 +1717,8 @@ export class Game {
         q.spotTimer = 0;
         q.rollTimer = 0;
         q.zoneIdx = -1;
+        q.path = null;
+        q.pathIdx = 0;
       }
     }
     this.claims = [new Map(), new Map()];
@@ -1734,6 +1792,14 @@ export class Game {
       focus = null;
     } else if (t.play === "iso" && !focus) {
       focus = pool.slice().sort((a, b) => offThreat(b) - offThreat(a))[0];
+    } else if (t.play === "dho") {
+      // the hand-off receiver must be someone other than the handler
+      if (!focus || focus === handler) {
+        focus =
+          pool
+            .filter((p) => p !== handler)
+            .sort((a, b) => offThreat(b) - offThreat(a))[0] || null;
+      }
     } else if (t.play === "post" && !focus) {
       focus = pool
         .slice()
@@ -1764,7 +1830,8 @@ export class Game {
     });
     const { handler, screener, focus } = this.roles;
     if (focus && !focus.annotation) {
-      focus.annotation = t.play === "iso" ? "ISO" : t.play === "post" ? "POST" : "GO-TO";
+      focus.annotation =
+        t.play === "iso" ? "ISO" : t.play === "post" ? "POST" : t.play === "dho" ? "DHO" : "GO-TO";
     }
     if (screener && !screener.annotation) screener.annotation = "SCREENER";
     if (handler && !handler.annotation) handler.annotation = "HANDLER";
@@ -1778,6 +1845,86 @@ export class Game {
     if (this.ball.holder) this.ball.holder.stats.tov++;
     this.emit("turnover", `Shot-clock violation on the ${this.teams[t].name}`, t);
     this.setupInbound(1 - t, this.oobSpot(this.ball.pos), { sc: 24 });
+  }
+
+  /* ---------- jump ball ---------- */
+  setupTipoff() {
+    this.phase = "setup";
+    this.tipoff = true;
+    this.deadTimer = rand(1.2, 1.8);
+    this.shotClock = 24;
+    this.shotClockActive = false;
+    this.ball.holder = null;
+    this.ball.flight = null;
+    this.ball.loose = null;
+    this.ball.pos = { x: COURT.W / 2, y: COURT.H / 2 };
+    this.lastPasser = null;
+    this.sinceCatch = 99;
+    this.fastBreak = 0;
+    this.screen = null;
+    this.claims = [new Map(), new Map()];
+    this.jumpers = [];
+    for (let ti = 0; ti < 2; ti++) {
+      const ps = this.teams[ti].players;
+      for (const p of ps) {
+        p.driving = false;
+        p.allowOOB = false;
+        p.spotIdx = -1;
+        p.spotTimer = 0;
+        p.rollTimer = 0;
+        p.zoneIdx = -1;
+        p.path = null;
+        p.pathIdx = 0;
+      }
+      const jumper = ps
+        .slice()
+        .sort((a, b) => b.heightIn + b.vertical * 0.3 - (a.heightIn + a.vertical * 0.3))[0];
+      this.jumpers.push(jumper);
+      // jumper at the circle on his defensive side, the rest fanned
+      // around it in their own half
+      const side = -this.attackSign(ti);
+      jumper.moveTarget = { x: COURT.W / 2 + side * 1.4, y: COURT.H / 2 };
+      const rest = ps.filter((p) => p !== jumper);
+      const ring = [
+        { dx: 8, dy: -7 },
+        { dx: 8, dy: 7 },
+        { dx: 14, dy: -15 },
+        { dx: 14, dy: 15 },
+      ];
+      rest.forEach((p, i) => {
+        p.moveTarget = { x: COURT.W / 2 + side * ring[i].dx, y: COURT.H / 2 + ring[i].dy };
+      });
+    }
+  }
+
+  resolveTipoff() {
+    this.tipoff = false;
+    this.phase = "live";
+    const [ja, jb] = this.jumpers;
+    const leap = (p: Player) => p.heightIn * 0.7 + p.vertical * 0.45 + rand(0, 26);
+    const winner = leap(ja) > leap(jb) ? ja : jb;
+    this.possession = winner.team;
+    this.setRoles(winner.team);
+    const mates = this.mates(winner)
+      .slice()
+      .sort((a, b) => dist(a.pos, this.ball.pos) - dist(b.pos, this.ball.pos));
+    const catcher = mates[0];
+    this.emit(
+      "recover",
+      `${winner.name} controls the tip — ${this.teams[winner.team].name} ball`,
+      winner.team
+    );
+    const from = { x: COURT.W / 2, y: COURT.H / 2 };
+    const to = { x: catcher.pos.x, y: catcher.pos.y };
+    this.ball.flight = {
+      kind: "inbound", // a tip: no pass commentary, no lane picks
+      from,
+      to,
+      t: 0,
+      dur: 0.2 + dist(from, to) / 40,
+      catcher,
+      passer: null,
+    };
   }
 
   setupInbound(team: number, spot: Vec, opts: { sc: number }) {
@@ -1798,6 +1945,7 @@ export class Game {
     this.sinceCatch = 99;
     this.fastBreak = 0;
     this.screen = null;
+    this.tipoff = false;
     this.claims = [new Map(), new Map()];
     this.setRoles(team);
     for (const t of this.teams) {
@@ -1808,6 +1956,8 @@ export class Game {
         p.spotTimer = 0;
         p.rollTimer = 0;
         p.zoneIdx = -1;
+        p.path = null;
+        p.pathIdx = 0;
       }
     }
     const tp = this.teams[team].players;
@@ -1864,6 +2014,7 @@ export class Game {
     iso: "an isolation",
     pnr: "the pick-and-roll",
     post: "a post-up",
+    dho: "a dribble hand-off",
   };
   static SCHEME_LABELS: Record<DefScheme, string> = {
     man: "man-to-man",
@@ -1924,6 +2075,32 @@ export class Game {
     this.emit("info", `LAB — possession over. Run another or resume the game.`, null);
   }
 
+  /** A staged player was dragged: his new position becomes his
+      starting spot, and (for role-less offense) the spot he holds
+      while the play runs. */
+  setHoldSpot(p: Player) {
+    p.moveTarget = { x: p.pos.x, y: p.pos.y };
+    p.vel = { x: 0, y: 0 };
+    if (p.team !== this.possession) return; // defenders re-shape per scheme
+    if (this.inb && p === this.inb.inbounder) {
+      this.inb.spot = { x: p.pos.x, y: p.pos.y };
+      return;
+    }
+    if (this.inb && p === this.inb.receiver) return;
+    const { handler, screener, focus } = this.roles;
+    if (p === handler || p === screener || p === focus) return; // role movement wins
+    const hoop = this.hoops[p.team];
+    const dir = hoop.x > COURT.W / 2 ? -1 : 1;
+    const ax = (p.pos.x - hoop.x) / dir;
+    const ay = p.pos.y - COURT.H / 2;
+    const d = dist(p.pos, hoop);
+    this.assignTargets.set(p.id, {
+      ax,
+      ay,
+      cat: d < 8 ? "inside" : d < 22 ? "mid" : "three",
+    });
+  }
+
   /** Leave lab mode and return to a normally simulated game. */
   resumeGame() {
     this.lab = null;
@@ -1961,7 +2138,12 @@ export class Game {
     this.emit("period", `End of ${this.qLabel()} — ${this.scoreLine()}`, null);
     this.quarter++;
     this.gameClock = this.quarter <= 4 ? this.quarterLen : 300;
-    if (this.quarter === 5) this.emit("period", `Tied up — we're headed to overtime!`, null);
+    if (this.quarter >= 5) {
+      // every overtime period opens with a jump ball
+      if (this.quarter === 5) this.emit("period", `Tied up — we're headed to overtime!`, null);
+      this.setupTipoff();
+      return;
+    }
     const nextPoss = (this.qStartPoss + this.quarter + 1) % 2;
     this.setupInbound(nextPoss, this.baselineSpot(nextPoss), { sc: 24 });
   }
