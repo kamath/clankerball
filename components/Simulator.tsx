@@ -89,12 +89,15 @@ export function Simulator({ initialConfig, teams }: SimulatorProps) {
               events={game.labEvents}
               labPhase={game.labPhase}
               labTool={game.labTool}
+              labRoles={game.labRoles}
               onStage={game.stageLab}
               onConfirm={game.confirmLab}
               onEdit={game.editLab}
               onRun={game.runLab}
               onToolChange={game.setLabTool}
               onClearPaths={game.clearLabPaths}
+              onSetPathMode={game.setPathMode}
+              onSetDefense={game.setLabDefense}
             />
           </ScrollArea>
         ) : (

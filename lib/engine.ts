@@ -11,6 +11,7 @@ import type {
   GameConfig,
   GameOpts,
   InboundLoc,
+  PathMode,
   PlayCall,
   Player,
   PlayerAssignment,
@@ -358,6 +359,7 @@ export class Game {
       annotation: null,
       path: null,
       pathIdx: 0,
+      pathHold: true,
       stats: { pts: 0, fgm: 0, fga: 0, tpm: 0, tpa: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0 },
     } as Player;
   }
@@ -652,14 +654,18 @@ export class Game {
         continue;
       }
       if (p.path && p.path.length) {
-        // lab-authored motion path: run the waypoints, then hold the end
+        // lab-authored motion path: run the waypoints in order
         if (p.pathIdx < p.path.length) {
           p.moveTarget = { ...p.path[p.pathIdx] };
           if (dist(p.pos, p.path[p.pathIdx]) < 2) p.pathIdx++;
-        } else {
-          p.moveTarget = { ...p.path[p.path.length - 1] };
+          continue;
         }
-        continue;
+        // route finished: hold the end spot, or (keep-moving) fall through
+        // and rejoin the live offense
+        if (p.pathHold) {
+          p.moveTarget = { ...p.path[p.path.length - 1] };
+          continue;
+        }
       }
       if (p.rollTimer > 0) {
         // screener rolling hard to the rim
@@ -2067,6 +2073,7 @@ export class Game {
     start?: InboundLoc;
     assignments?: (PlayerAssignment | null)[];
     inbounderSlot?: number | null;
+    pathModes?: PathMode[];
   }) {
     if (this.over) return;
     this.lab = { team: opts.offense };
@@ -2102,6 +2109,94 @@ export class Game {
       }
     }
     this.ballFollow();
+    // seed each off-ball player with a default route for the play, so the
+    // designer opens with editable arrows instead of a blank floor
+    this.labDefaultPaths(opts.offense, opts.play, opts.pathModes);
+  }
+
+  /** Default motion routes for a scripted possession — one editable path per
+      off-ball offensive player, shaped by the play. The ball-handler drives,
+      so he gets none. `modes` (per roster slot) carries each route's end
+      behavior across a re-stage. Re-run whenever the play (re)stages. */
+  labDefaultPaths(team: number, play: PlayCall, modes?: PathMode[]) {
+    const ps = this.teams[team].players;
+    const { handler, screener, focus } = this.roles;
+    const hoop = this.hoops[team];
+    const rim = this.spotPos(team, { ax: 3, ay: 0, cat: "inside" });
+    // perimeter spacing spots to spread the supporting cast across, by play
+    const spacing: Spot[] =
+      play === "motion"
+        ? [
+            { ax: 17, ay: -16, cat: "three" },
+            { ax: 17, ay: 16, cat: "three" },
+            { ax: 1.5, ay: -20.5, cat: "three" },
+            { ax: 1.5, ay: 20.5, cat: "three" },
+          ]
+        : [
+            { ax: 1.5, ay: -20.5, cat: "three" },
+            { ax: 1.5, ay: 20.5, cat: "three" },
+            { ax: 17, ay: -16, cat: "three" },
+            { ax: 17, ay: 16, cat: "three" },
+            { ax: 24.5, ay: 0, cat: "three" },
+          ];
+    const pool = spacing.map((s) => this.spotPos(team, s));
+    const takeNearest = (from: Vec): Vec => {
+      let bi = 0;
+      for (let i = 1; i < pool.length; i++)
+        if (dist(pool[i], from) < dist(pool[bi], from)) bi = i;
+      return pool.splice(bi, 1)[0] ?? rim;
+    };
+    ps.forEach((p, slot) => {
+      p.path = null;
+      p.pathIdx = 0;
+      p.pathHold = modes ? modes[slot] !== "flow" : true;
+      if (p === handler) return; // he'll have the ball
+      const side = p.pos.y >= COURT.H / 2 ? 1 : -1;
+      const route: Vec[] = [{ x: p.pos.x, y: p.pos.y }];
+      const fixed = this.assignTargets.get(p.id);
+      if (fixed && p !== screener && p !== focus) {
+        route.push(this.spotPos(team, fixed));
+      } else if (play === "pnr" && p === screener && handler) {
+        // climb up to screen the handler, then roll hard to the rim
+        route.push({
+          x: handler.pos.x + (hoop.x - handler.pos.x) * 0.12,
+          y: handler.pos.y + side * 2,
+        });
+        route.push(rim);
+      } else if (p === focus && play === "post") {
+        route.push(this.spotPos(team, { ax: 4.5, ay: side * 5.5, cat: "inside" }));
+      } else if (p === focus && play === "iso") {
+        route.push(this.spotPos(team, { ax: 24.5, ay: 0, cat: "three" }));
+      } else if (p === focus && play === "dho") {
+        // come off toward the handoff, then turn the corner to the rim
+        route.push(this.spotPos(team, { ax: 17, ay: side * 14, cat: "three" }));
+        route.push(rim);
+      } else {
+        route.push(takeNearest(p.pos));
+      }
+      if (route.length >= 2) {
+        p.path = route;
+        p.pathIdx = 0;
+      }
+    });
+  }
+
+  /** Swap the defensive scheme on a staged possession without disturbing the
+      offense — recompute the defensive shape and (while frozen) snap the
+      defenders into it. The offense, its roles, and authored routes are kept. */
+  labSetDefense(scheme: DefScheme) {
+    if (!this.lab) return;
+    const def = 1 - this.possession;
+    this.tactics[def].defScheme = scheme;
+    this.updateDefense();
+    if (this.frozen) {
+      for (const p of this.teams[def].players) {
+        if (p.moveTarget) {
+          p.pos = { ...p.moveTarget };
+          p.vel = { x: 0, y: 0 };
+        }
+      }
+    }
   }
 
   labEnd() {

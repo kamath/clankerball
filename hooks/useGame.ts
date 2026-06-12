@@ -12,6 +12,7 @@ import type {
   DefScheme,
   GameConfig,
   InboundLoc,
+  PathMode,
   PlayCall,
   Player,
   PlayerAssignment,
@@ -42,6 +43,7 @@ export interface PossessionOpts {
   start: InboundLoc;
   assignments: (PlayerAssignment | null)[];
   inbounder: number | null;
+  pathModes: PathMode[];
 }
 
 export interface BoxPlayer {
@@ -90,6 +92,8 @@ export function useGame(initialConfig: GameConfig) {
   const [labEvents, setLabEvents] = useState<SimEvent[]>([]);
   const [labPhase, setLabPhaseState] = useState<LabPhase>("idle");
   const [labTool, setLabToolState] = useState<LabTool>("move");
+  // resolved on-court role label per offensive roster slot (HANDLER, SPACE…)
+  const [labRoles, setLabRoles] = useState<(string | null)[]>([]);
   const [boxTeams, setBoxTeams] = useState<BoxTeam[]>([]);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeedState] = useState(2);
@@ -204,6 +208,10 @@ export function useGame(initialConfig: GameConfig) {
         dragP.pos.x = clamp(c.x, -2.5, COURT.W + 2.5);
         dragP.pos.y = clamp(c.y, -2.5, COURT.H + 2.5);
         dragP.vel = { x: 0, y: 0 };
+        // the route starts where the player stands, so drag its base along
+        if (dragP.path && dragP.path.length) {
+          dragP.path[0] = { x: dragP.pos.x, y: dragP.pos.y };
+        }
       } else if (pathP) {
         const c = toCourt(e);
         const last = pts[pts.length - 1];
@@ -312,6 +320,8 @@ export function useGame(initialConfig: GameConfig) {
       lab.runPossession({ ...opts, inbounderSlot: opts.inbounder });
       lab.frozen = true; // hold the formation for editing
       labGameRef.current = lab;
+      // surface the engine's resolved roles so the UI can show them
+      setLabRoles(lab.teams[opts.offense].players.map((p) => p.annotation));
       setLabEvents([]);
       modeRef.current = "lab";
       setLabPhase("config");
@@ -366,6 +376,27 @@ export function useGame(initialConfig: GameConfig) {
     setLabToolState(t);
   }, []);
 
+  /** Swap the defensive scheme in place — only the defense re-shapes, the
+      offense and any authored moves/paths are left exactly as they are. */
+  const setLabDefense = useCallback(
+    (scheme: DefScheme) => {
+      const lab = labGameRef.current;
+      if (!lab) return;
+      lab.labSetDefense(scheme);
+      setSnapshot(sampleSnapshot(lab));
+    },
+    [sampleSnapshot]
+  );
+
+  /** Set a staged player's route-end behavior in place (no re-stage, so any
+      authored routes survive). `flow` = rejoin the offense after the route. */
+  const setPathMode = useCallback((slot: number, mode: PathMode) => {
+    const lab = labGameRef.current;
+    if (!lab) return;
+    const p = lab.teams[lab.possession]?.players[slot];
+    if (p) p.pathHold = mode !== "flow";
+  }, []);
+
   /** Leave the lab; the real game continues exactly where it was. */
   const exitLab = useCallback(() => {
     modeRef.current = "game";
@@ -395,6 +426,7 @@ export function useGame(initialConfig: GameConfig) {
     labEvents,
     labPhase,
     labTool,
+    labRoles,
     boxTeams,
     playing,
     speed,
@@ -410,6 +442,8 @@ export function useGame(initialConfig: GameConfig) {
     exitLab,
     clearLabPaths,
     setLabTool,
+    setLabDefense,
+    setPathMode,
     getConfig: () => configRef.current,
   };
 }

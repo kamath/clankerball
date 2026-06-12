@@ -7,8 +7,8 @@
    possession and freezes when it ends. The real game is paused
    and untouched the whole time.
    ============================================================ */
-import { useEffect, useState } from "react";
-import { MousePointer2, PenLine, Eraser } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { MousePointer2, PenLine, Eraser, Flag, Repeat } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import type { BoxTeam, LabPhase, LabTool, PossessionOpts, Snapshot } from "@/hooks/useGame";
-import type { DefScheme, InboundLoc, PlayCall, PlayerAssignment, SimEvent } from "@/lib/types";
+import type { DefScheme, InboundLoc, PathMode, PlayCall, PlayerAssignment, SimEvent } from "@/lib/types";
 
 const PLAYS: { value: PlayCall; label: string; blurb: string }[] = [
   { value: "motion", label: "Motion", blurb: "free-flowing offense, everyone hunts a spot" },
@@ -44,6 +44,21 @@ const INBOUNDS: { value: InboundLoc; label: string }[] = [
   { value: "base-bot", label: "Baseline — bottom (under basket)" },
 ];
 
+// on-court annotation -> friendly text for the "Auto — …" role hint
+const ROLE_FRIENDLY: Record<string, string> = {
+  HANDLER: "Handler",
+  SCREENER: "Screener",
+  "GO-TO": "Go-to",
+  ISO: "Iso",
+  POST: "Post",
+  DHO: "Hand-off",
+  CORNER: "Corner",
+  WING: "Wing",
+  TOP: "Top",
+  DUNKER: "Dunker",
+  SPACE: "Space",
+};
+
 const ASSIGNMENTS: { value: PlayerAssignment | "auto"; label: string }[] = [
   { value: "auto", label: "Auto" },
   { value: "handler", label: "Ball handler" },
@@ -61,12 +76,15 @@ interface PossessionLabProps {
   events: SimEvent[];
   labPhase: LabPhase;
   labTool: LabTool;
+  labRoles: (string | null)[];
   onStage: (opts: PossessionOpts) => void;
   onConfirm: () => void;
   onEdit: () => void;
   onRun: () => void;
   onToolChange: (t: LabTool) => void;
   onClearPaths: () => void;
+  onSetPathMode: (slot: number, mode: PathMode) => void;
+  onSetDefense: (scheme: DefScheme) => void;
 }
 
 export function PossessionLab({
@@ -74,12 +92,15 @@ export function PossessionLab({
   events,
   labPhase,
   labTool,
+  labRoles,
   onStage,
   onConfirm,
   onEdit,
   onRun,
   onToolChange,
   onClearPaths,
+  onSetPathMode,
+  onSetDefense,
 }: PossessionLabProps) {
   const [offense, setOffense] = useState(0);
   const [play, setPlay] = useState<PlayCall>("pnr");
@@ -89,21 +110,41 @@ export function PossessionLab({
     Array(5).fill("auto")
   );
   const [inbounder, setInbounder] = useState<number | "auto">("auto");
+  const [pathModes, setPathModes] = useState<PathMode[]>(Array(5).fill("stay"));
   const [rev, setRev] = useState(0); // bump to re-stage with same options
 
-  // while configuring, any change to the script instantly re-stages the
-  // formation. once the lineup is confirmed the config controls lock, so this
-  // never fires under authored moves/paths and wipes them.
+  // route-end modes and the defensive scheme ride along on re-stages but must
+  // NOT trigger one (that would re-randomize the offense and wipe authored
+  // routes); refs carry the latest values into onStage.
+  const pathModesRef = useRef(pathModes);
+  pathModesRef.current = pathModes;
+  const schemeRef = useRef(scheme);
+  schemeRef.current = scheme;
+
+  // while configuring, any change to the offensive script instantly re-stages
+  // the formation. the defense is handled separately (see the scheme select),
+  // so changing it never disturbs the offense. once the lineup is confirmed the
+  // config controls lock, so this never fires under authored moves/paths.
   useEffect(() => {
     onStage({
       offense,
       play,
-      defScheme: scheme,
+      defScheme: schemeRef.current,
       start,
       assignments: assignments.map((a) => (a === "auto" ? null : a)),
       inbounder: inbounder === "auto" ? null : inbounder,
+      pathModes: pathModesRef.current,
     });
-  }, [offense, play, scheme, start, assignments, inbounder, rev, onStage]);
+  }, [offense, play, start, assignments, inbounder, rev, onStage]);
+
+  const setPathMode = (slot: number, mode: PathMode) => {
+    setPathModes((prev) => {
+      const next = [...prev];
+      next[slot] = mode;
+      return next;
+    });
+    onSetPathMode(slot, mode); // mutate the live route in place — no re-stage
+  };
 
   if (teams.length < 2) return null;
   // config controls are live only while configuring; confirming locks them so
@@ -141,6 +182,7 @@ export function PossessionLab({
                   setOffense(ti);
                   setAssignments(Array(5).fill("auto"));
                   setInbounder("auto");
+                  setPathModes(Array(5).fill("stay"));
                 }}
               >
                 <span className="mr-1.5 size-2.5 rounded-full" style={{ background: t.color }} />
@@ -211,7 +253,14 @@ export function PossessionLab({
         </div>
         <div className="flex flex-col gap-1.5">
           <Label>Defense</Label>
-          <Select value={scheme} onValueChange={(v) => setScheme(v as DefScheme)} disabled={!configurable}>
+          <Select
+            value={scheme}
+            onValueChange={(v) => {
+              setScheme(v as DefScheme);
+              onSetDefense(v as DefScheme); // re-shape only the defense, in place
+            }}
+            disabled={!configurable}
+          >
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
@@ -228,10 +277,10 @@ export function PossessionLab({
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Roles ({offTeam.name})</Label>
+        <Label>Roles & routes ({offTeam.name})</Label>
         {offTeam.players.map((bp, slot) => (
           <div key={bp.id} className="flex items-center gap-2">
-            <span className="w-32 truncate text-sm">
+            <span className="w-24 truncate text-sm">
               #{bp.number} {bp.name.split(" ").slice(-1)[0]}
             </span>
             <Select
@@ -240,7 +289,13 @@ export function PossessionLab({
               disabled={!configurable}
             >
               <SelectTrigger className="h-8 flex-1">
-                <SelectValue />
+                <span className="truncate">
+                  {assignments[slot] === "auto"
+                    ? labRoles[slot]
+                      ? `Auto — ${ROLE_FRIENDLY[labRoles[slot]!] ?? labRoles[slot]}`
+                      : "Auto"
+                    : ASSIGNMENTS.find((a) => a.value === assignments[slot])?.label}
+                </span>
               </SelectTrigger>
               <SelectContent>
                 {ASSIGNMENTS.map((a) => (
@@ -250,8 +305,29 @@ export function PossessionLab({
                 ))}
               </SelectContent>
             </Select>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 w-[6.5rem] shrink-0 justify-start"
+              title="What this player does at the end of his route"
+              onClick={() => setPathMode(slot, pathModes[slot] === "stay" ? "flow" : "stay")}
+            >
+              {pathModes[slot] === "stay" ? (
+                <>
+                  <Flag className="mr-1.5 size-3.5" /> Stay
+                </>
+              ) : (
+                <>
+                  <Repeat className="mr-1.5 size-3.5" /> Flow
+                </>
+              )}
+            </Button>
           </div>
         ))}
+        <p className="text-xs text-muted-foreground">
+          Route end — <span className="font-medium">Stay</span> holds the spot,{" "}
+          <span className="font-medium">Flow</span> rejoins the offense and keeps moving.
+        </p>
       </div>
 
       <div className="flex flex-col gap-1.5">
