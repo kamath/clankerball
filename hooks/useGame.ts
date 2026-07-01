@@ -8,14 +8,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { COURT, Game, fmtClock } from "@/lib/engine";
 import { PAD, Renderer, SCALE } from "@/lib/renderer";
-import type {
-  DefScheme,
-  GameConfig,
-  InboundLoc,
-  Player,
-  SimEvent,
-  Vec,
-} from "@/lib/types";
+import type { TeamPlan } from "@/lib/plan";
+import type { GameConfig, Player, SimEvent, Vec } from "@/lib/types";
 
 export type LabPhase = "idle" | "config" | "staged" | "running" | "ended";
 export type LabTool = "move" | "path";
@@ -35,11 +29,10 @@ export interface Snapshot {
 
 export interface PossessionOpts {
   offense: number;
-  defScheme: DefScheme;
-  start: InboundLoc;
-  /** offensive roster slots to score through, in priority order */
-  scorers: number[];
-  inbounder: number | null;
+  /** compiled coaching instructions for the offense; null = let it flow */
+  plan: TeamPlan | null;
+  /** compiled instructions for the defending team; null = base man-to-man */
+  defPlan: TeamPlan | null;
 }
 
 export interface BoxPlayer {
@@ -93,6 +86,9 @@ export function useGame(initialConfig: GameConfig) {
   // resolved on-court role label per offensive roster slot (HANDLER, SPACE…)
   const [labRoles, setLabRoles] = useState<(string | null)[]>([]);
   const [boxTeams, setBoxTeams] = useState<BoxTeam[]>([]);
+  // standing coaching plans for the real game, re-applied on a new game
+  const plansRef = useRef<(TeamPlan | null)[]>([null, null]);
+  const [teamPlans, setTeamPlans] = useState<(TeamPlan | null)[]>([null, null]);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeedState] = useState(2);
   const [version, setVersion] = useState(0); // bumps when a new game is built
@@ -130,6 +126,10 @@ export function useGame(initialConfig: GameConfig) {
         onEvent: (e) => setEvents((prev) => (prev.length > 250 ? [e, ...prev.slice(0, 250)] : [e, ...prev])),
       });
       gameRef.current = game;
+      // standing instructions carry over into the new game
+      plansRef.current.forEach((plan, ti) => {
+        if (plan) game.setPlan(ti, plan);
+      });
       // a new game always exits the lab
       modeRef.current = "game";
       labGameRef.current = null;
@@ -318,7 +318,7 @@ export function useGame(initialConfig: GameConfig) {
           setLabEvents((prev) => (prev.length > 100 ? [e, ...prev.slice(0, 100)] : [e, ...prev]));
         },
       });
-      lab.runPossession({ ...opts, inbounderSlot: opts.inbounder });
+      lab.runPossession({ offense: opts.offense, plan: opts.plan, defPlan: opts.defPlan });
       lab.frozen = true; // hold the formation for editing
       labGameRef.current = lab;
       // surface the engine's resolved roles so the UI can show them
@@ -378,17 +378,14 @@ export function useGame(initialConfig: GameConfig) {
     setLabToolState(t);
   }, []);
 
-  /** Swap the defensive scheme in place — only the defense re-shapes, the
-      offense and any authored moves/paths are left exactly as they are. */
-  const setLabDefense = useCallback(
-    (scheme: DefScheme) => {
-      const lab = labGameRef.current;
-      if (!lab) return;
-      lab.labSetDefense(scheme);
-      setSnapshot(sampleSnapshot(lab));
-    },
-    [sampleSnapshot]
-  );
+  /** Give a team standing coaching instructions for the real game. The
+      engine starts optimizing for them on its next possession; they also
+      carry over to new games. */
+  const setTeamPlan = useCallback((teamIdx: number, plan: TeamPlan | null) => {
+    plansRef.current[teamIdx] = plan;
+    setTeamPlans([...plansRef.current]);
+    gameRef.current?.setPlan(teamIdx, plan);
+  }, []);
 
   /** Leave the lab; the real game continues exactly where it was. */
   const exitLab = useCallback(() => {
@@ -434,7 +431,8 @@ export function useGame(initialConfig: GameConfig) {
     exitLab,
     clearLabPaths,
     setLabTool,
-    setLabDefense,
+    teamPlans,
+    setTeamPlan,
     getConfig: () => configRef.current,
   };
 }

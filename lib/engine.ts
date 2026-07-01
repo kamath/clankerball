@@ -6,6 +6,7 @@
 
    Ported from the original engine.js with logic preserved exactly.
    ============================================================ */
+import type { PlanAction, TeamPlan } from "./plan";
 import type {
   DefScheme,
   GameConfig,
@@ -305,6 +306,17 @@ export class Game {
   /** fixed hold-spots for dragged-into-place players, keyed by player id */
   assignTargets: Map<number, Spot> = new Map();
   screen!: { timer: number; screener: Player; handler: Player } | null;
+  /** live plan-driven pick-and-roll: screener jogs to the ball ("approach"),
+      sets the pick ("set"), then rolls or pops */
+  pnr: {
+    handler: Player;
+    screener: Player;
+    finish: "roll" | "pop";
+    phase: "approach" | "set";
+    timer: number;
+  } | null = null;
+  /** seconds before the offense hunts the next ball screen */
+  pnrCooldown = 0;
   /** seconds of transition remaining after a live change of possession */
   fastBreak = 0;
   /** single-possession lab mode: which team's possession we're watching */
@@ -355,6 +367,10 @@ export class Game {
   }
 
   makePlayer(cfg: PlayerConfig, team: number, slot: number): Player {
+    const baseTend = Object.assign(
+      { shoot: 50, three: 50, drive: 50, pass: 50, kickout: 50, help: 50, crash: 50, gamble: 50 },
+      cfg.tendencies || {}
+    );
     return {
       ...cfg,
       ...fillRatings(cfg),
@@ -362,10 +378,8 @@ export class Game {
       team,
       slot,
       id: team * 5 + slot,
-      tend: Object.assign(
-        { shoot: 50, three: 50, drive: 50, pass: 50, kickout: 50, help: 50, crash: 50, gamble: 50 },
-        cfg.tendencies || {}
-      ),
+      tend: { ...baseTend },
+      baseTend,
       pos: { x: 47 + rand(-15, 15), y: 25 + rand(-15, 15) },
       vel: { x: 0, y: 0 },
       moveTarget: null,
@@ -572,6 +586,7 @@ export class Game {
     }
     this.sinceCatch += dt;
     this.fastBreak = Math.max(0, this.fastBreak - dt);
+    this.pnrCooldown = Math.max(0, this.pnrCooldown - dt);
     if (this.screen) {
       this.screen.timer -= dt;
       if (this.screen.timer <= 0) this.screen = null;
@@ -667,12 +682,14 @@ export class Game {
       return;
     }
     const holder = this.ball.holder;
+    const planHandled = this.runPlanActions(dt);
     for (const p of this.teams[this.possession].players) {
       if (p === holder) continue;
       if (this.ball.flight && this.ball.flight.catcher === p) {
         p.moveTarget = { ...this.ball.flight.to };
         continue;
       }
+      if (planHandled.has(p)) continue;
       if (p.path && p.path.length) {
         // lab-authored motion path: run the waypoints in order
         if (p.pathIdx < p.path.length) {
@@ -712,6 +729,127 @@ export class Game {
       return true;
     }
     return false;
+  }
+
+  /** Drive the compiled plan's on-court actions (pick-and-roll, off-ball
+      screens to free a target, post-ups). Returns the offensive players
+      whose movement is owned by the play this frame, so the generic
+      spot-flow logic leaves them alone. */
+  runPlanActions(dt: number): Set<Player> {
+    const handled = new Set<Player>();
+    const team = this.possession;
+    const plan = this.tactics[team].plan;
+    if (!plan) {
+      this.pnr = null;
+      return handled;
+    }
+    const ps = this.teams[team].players;
+    const holder = this.ball.holder;
+    const ballFront = this.inFrontcourt(this.ball.pos, team);
+
+    // ---- pick and roll ----
+    const pa = plan.actions.find((a) => a.type === "pickAndRoll");
+    if (pa) {
+      if (this.pnr) {
+        const { handler, screener } = this.pnr;
+        if (this.pnr.phase === "approach") {
+          this.pnr.timer -= dt;
+          // the action died: handler gave the ball up or the screen stalled
+          if (holder !== handler || this.pnr.timer <= 0) {
+            this.pnr = null;
+            this.pnrCooldown = 1.5;
+          } else {
+            const def = this.nearestOppTo(handler.team, handler.pos).p;
+            screener.moveTarget = def ? { x: def.pos.x, y: def.pos.y } : { ...handler.pos };
+            handled.add(screener);
+            if (def && dist(screener.pos, def.pos) < 2.4 && dist(screener.pos, handler.pos) < 6) {
+              // pick is set: handler turns the corner off the screener's body
+              this.pnr.phase = "set";
+              this.pnr.timer = 0.8;
+              this.screen = { timer: 1.1, screener, handler };
+              handler.driving = true;
+              handler.driveSide = Math.sign(screener.pos.y - handler.pos.y) || 1;
+              this.emit("info", `${screener.name} sets the pick for ${handler.name}`, team);
+            }
+          }
+        } else {
+          // hold the screen a beat, then roll to the rim or pop to the arc
+          this.pnr.timer -= dt;
+          screener.moveTarget = { x: screener.pos.x, y: screener.pos.y };
+          handled.add(screener);
+          if (this.pnr.timer <= 0) {
+            if (this.pnr.finish === "pop") {
+              const side = screener.pos.y >= COURT.H / 2 ? 1 : -1;
+              const idx = SPOTS.findIndex(
+                (s) => s.cat === "three" && s.ax > 20 && Math.sign(s.ay || side) === side
+              );
+              screener.spotIdx = idx >= 0 ? idx : 4;
+              screener.spotTimer = 6;
+            } else {
+              screener.rollTimer = 2.4;
+            }
+            this.pnr = null;
+            this.pnrCooldown = rand(5, 8);
+          }
+        }
+      } else if (this.pnrCooldown <= 0 && holder && ballFront && !holder.driving) {
+        const handler = (pa.handlerSlot != null ? ps[pa.handlerSlot] : this.roles.handler) ?? null;
+        let screener = (pa.screenerSlot != null ? ps[pa.screenerSlot] : this.roles.screener) ?? null;
+        if (screener === handler) screener = null;
+        if (handler && screener && holder === handler) {
+          this.pnr = {
+            handler,
+            screener,
+            finish: pa.finish ?? "roll",
+            phase: "approach",
+            timer: 4.5,
+          };
+        }
+      }
+    } else {
+      this.pnr = null;
+    }
+
+    // ---- get a man open: a teammate keeps screening his defender ----
+    const ga = plan.actions.find((a) => a.type === "getOpen");
+    if (ga && ga.targetSlot != null && holder && ballFront) {
+      const target = ps[ga.targetSlot];
+      let scr = ga.screenerSlot != null ? (ps[ga.screenerSlot] ?? null) : null;
+      if (!scr || scr === target) {
+        scr =
+          ps
+            .filter((q) => q !== target && q !== holder && q !== this.roles.handler)
+            .sort((a, b) => b.strength + b.heightIn * 2 - (a.strength + a.heightIn * 2))[0] ??
+          null;
+      }
+      if (target && target !== holder && scr && scr !== holder && !handled.has(scr)) {
+        const def = this.nearestOppTo(team, target.pos).p;
+        if (def) {
+          scr.moveTarget = { x: def.pos.x, y: def.pos.y };
+          handled.add(scr);
+        }
+        // the target keeps sprinting to fresh spots off the screens
+        if (target.spotTimer > 2.4) target.spotTimer = 2.4;
+      }
+    }
+
+    // ---- post up: the target seals on the block, waiting for the entry ----
+    const pu = plan.actions.find((a) => a.type === "postUp");
+    if (pu && pu.targetSlot != null && ballFront) {
+      const target = ps[pu.targetSlot];
+      if (
+        target &&
+        target !== holder &&
+        !handled.has(target) &&
+        !(this.ball.flight && this.ball.flight.catcher === target)
+      ) {
+        const side = target.pos.y >= COURT.H / 2 ? 1 : -1;
+        target.moveTarget = this.spotPos(team, { ax: 4.5, ay: side * 5.5, cat: "inside" });
+        handled.add(target);
+      }
+    }
+
+    return handled;
   }
 
   /** Fill the lanes: rim runner, two corner sprinters, a trailer. */
@@ -755,6 +893,26 @@ export class Game {
     const claims = this.claims[p.team];
     claims.delete(p.id);
     const taken = new Set(claims.values());
+    // iso spacing: everyone but the iso man clears out to the arc,
+    // away from his side of the floor
+    const isoA = this.tactics[p.team].plan?.actions.find((a) => a.type === "iso");
+    const isoMan = isoA?.targetSlot != null ? this.teams[p.team].players[isoA.targetSlot] : null;
+    if (isoMan && isoMan !== p && p.team === this.possession) {
+      let cands = SPOTS.map((s, i) => i).filter(
+        (i) =>
+          SPOTS[i].cat === "three" &&
+          !taken.has(i) &&
+          dist(this.spotPos(p.team, SPOTS[i]), isoMan.pos) > 16
+      );
+      if (!cands.length)
+        cands = SPOTS.map((s, i) => i).filter((i) => SPOTS[i].cat === "three" && !taken.has(i));
+      if (cands.length) {
+        p.spotIdx = pick(cands);
+        claims.set(p.id, p.spotIdx);
+        p.spotTimer = rand(4, 8);
+        return;
+      }
+    }
     const tf = (t: number) => 0.3 + t * 0.014; // tendency factor: 50 -> 1.0
     const w3 = Math.pow(p.threePoint, 2.2) * tf(p.tend.three);
     const wm = Math.pow(p.midRange, 2.2);
@@ -1055,6 +1213,12 @@ export class Game {
       return;
     }
 
+    // a ball screen is on its way: keep the dribble alive and let it arrive
+    if (this.pnr && this.pnr.handler === h && this.pnr.phase === "approach" && sc > 6) {
+      h.moveTarget = { x: h.pos.x, y: h.pos.y };
+      return;
+    }
+
     const { focus, scorers } = this.roles;
     // work the ball to the designated scoring options in priority order: feed
     // the first one who's open in the frontcourt. the primary option gets the
@@ -1089,6 +1253,8 @@ export class Game {
       // lean toward the designated scoring options as kick/feed targets
       const prio = scorers.indexOf(m);
       if (prio >= 0) v += 0.18 - prio * 0.05;
+      // hit the roller: a screener diving to the rim is the pass the play wants
+      if (m === this.roles.screener && m.rollTimer > 0) v += 0.2;
       if (v > bestVal) {
         bestVal = v;
         best = m;
@@ -1118,6 +1284,10 @@ export class Game {
     if (lateGame && margin < 0) need *= margin <= -9 ? 0.7 : 0.85; // trailing: hurry
     if (lateGame && margin > 0 && gc < 60) need *= 1.3; // leading: slow it down
     if (breaking) need *= 0.8; // transition looks are good looks
+    // coached tempo: push for early offense, or grind for the best look
+    const pace = this.tactics[h.team].plan?.pace;
+    if (pace === "fast") need *= 0.86;
+    else if (pace === "slow") need *= 1.15;
     // designated scorers hunt their shot — the higher the option, the harder
     const myPrio = scorers.indexOf(h);
     if (myPrio === 0) need *= 0.88;
@@ -1700,6 +1870,7 @@ export class Game {
     }
     this.claims = [new Map(), new Map()];
     this.screen = null;
+    this.pnr = null;
     // a live change of possession ignites the break
     if (opts.live && changed) this.fastBreak = 6;
     else if (changed) this.fastBreak = 0;
@@ -1707,12 +1878,34 @@ export class Game {
     if (this.lab && changed && p.team !== this.lab.team) this.labEnd();
   }
 
-  /** Resolve the roles for the team now on offense from the chosen scoring
-      options. The primary option is the go-to scorer (`focus`); the best
-      on-ball creator brings it up (`handler`). */
+  /** Apply (or clear) a compiled coaching plan for a team. Scoring options
+      and the defensive scheme come along; tendency biases are layered onto
+      each player's base tendencies. */
+  setPlan(team: number, plan: TeamPlan | null) {
+    const t = this.tactics[team];
+    t.plan = plan;
+    t.scorers = plan?.scorerSlots ?? [];
+    if (plan?.defScheme) t.defScheme = plan.defScheme;
+    for (const p of this.teams[team].players) {
+      const bias = plan?.directives.find((d) => d.slot === p.slot)?.tendencyBias ?? null;
+      for (const k of Object.keys(p.baseTend) as (keyof typeof p.baseTend)[]) {
+        p.tend[k] = clamp(p.baseTend[k] + (bias?.[k] ?? 0), 1, 99);
+      }
+      p.zoneIdx = -1; // zones re-resolve if the scheme changed
+    }
+    this.pnr = null;
+    this.pnrCooldown = 0;
+    if (this.possession === team && !this.ball.loose) this.setRoles(team);
+  }
+
+  /** Resolve the roles for the team now on offense from its plan / chosen
+      scoring options. The primary option is the go-to scorer (`focus`); the
+      plan's initiator (or the best on-ball creator) brings it up (`handler`);
+      a plan with a pick-and-roll resolves its `screener`. */
   setRoles(team: number) {
     const ps = this.teams[team].players;
     const t = this.tactics[team];
+    const plan = t.plan ?? null;
 
     // hold-spots are authored by dragging players, not by setRoles
     this.assignTargets.clear();
@@ -1723,16 +1916,34 @@ export class Game {
       .filter((p): p is Player => !!p);
     const focus = scorers[0] || null;
 
-    // the best initiator brings the ball up and runs the offense
-    const handler = ps
-      .slice()
-      .sort(
-        (a, b) =>
-          b.ballHandle * 0.6 + b.iq * 0.2 + b.speed * 0.2 -
-          (a.ballHandle * 0.6 + a.iq * 0.2 + a.speed * 0.2)
-      )[0];
+    // the plan's initiator — otherwise the best creator — runs the offense
+    const pa = plan?.actions.find((a): a is PlanAction => a.type === "pickAndRoll") ?? null;
+    const handlerSlot = pa?.handlerSlot ?? plan?.handlerSlot ?? null;
+    const handler =
+      (handlerSlot != null ? ps[handlerSlot] : null) ??
+      ps
+        .slice()
+        .sort(
+          (a, b) =>
+            b.ballHandle * 0.6 + b.iq * 0.2 + b.speed * 0.2 -
+            (a.ballHandle * 0.6 + a.iq * 0.2 + a.speed * 0.2)
+        )[0];
 
-    this.roles = { handler, screener: null, focus, scorers };
+    // a pick-and-roll needs a screener: the named one, else the best body
+    let screener: Player | null = null;
+    if (pa) {
+      screener = (pa.screenerSlot != null ? ps[pa.screenerSlot] : null) ?? null;
+      if (!screener || screener === handler) {
+        screener =
+          ps
+            .filter((q) => q !== handler)
+            .sort((a, b) => b.strength + b.heightIn * 2 - (a.strength + a.heightIn * 2))[0] ??
+          null;
+      }
+      if (screener === handler) screener = null;
+    }
+
+    this.roles = { handler, screener, focus, scorers };
     this.annotate(team);
   }
 
@@ -1740,12 +1951,25 @@ export class Game {
   annotate(team: number) {
     for (const t of this.teams) for (const p of t.players) p.annotation = null;
     if (!this.lab || this.lab.team !== team) return;
-    const { handler, scorers } = this.roles;
+    const { handler, screener, scorers } = this.roles;
     const OPTION_LABELS = ["1ST", "2ND", "3RD"];
     scorers.forEach((p, i) => {
       if (p && i < OPTION_LABELS.length) p.annotation = OPTION_LABELS[i];
     });
     if (handler && !handler.annotation) handler.annotation = "HANDLER";
+    if (screener && !screener.annotation) screener.annotation = "SCREEN";
+    const plan = this.tactics[team].plan;
+    if (!plan) return;
+    for (const a of plan.actions) {
+      const tgt = a.targetSlot != null ? this.teams[team].players[a.targetSlot] : null;
+      if (tgt && !tgt.annotation)
+        tgt.annotation = a.type === "postUp" ? "POST" : a.type === "iso" ? "ISO" : "TARGET";
+    }
+    // an explicit coach's label wins over the inferred role
+    for (const d of plan.directives) {
+      const p = this.teams[team].players[d.slot];
+      if (p && d.note) p.annotation = d.note;
+    }
   }
 
   shotClockViolation() {
@@ -1931,13 +2155,15 @@ export class Game {
     zone: "a 2-3 zone",
   };
 
-  /** Run a single scripted possession: the offense looks to score through
-      its chosen options against `defScheme`. Starts from a clean inbound
-      formation — full court (own baseline) or half court (frontcourt
-      sideline). The sim freezes when the possession ends. */
+  /** Run a single scripted possession: the offense optimizes for its
+      compiled plan (or just flows) against the defense's plan/scheme.
+      Starts from a clean inbound formation. The sim freezes when the
+      possession ends. */
   runPossession(opts: {
     offense: number;
-    defScheme: DefScheme;
+    plan?: TeamPlan | null;
+    defPlan?: TeamPlan | null;
+    defScheme?: DefScheme;
     scorers?: number[];
     start?: InboundLoc;
     inbounderSlot?: number | null;
@@ -1946,16 +2172,20 @@ export class Game {
     this.lab = { team: opts.offense };
     this.frozen = false;
     this.labPending = null;
-    this.tactics[opts.offense].scorers = opts.scorers ?? [];
-    this.tactics[opts.offense].inbounderSlot = opts.inbounderSlot ?? null;
-    this.tactics[1 - opts.offense].defScheme = opts.defScheme;
+    this.setPlan(opts.offense, opts.plan ?? null);
+    this.setPlan(1 - opts.offense, opts.defPlan ?? null);
+    if (opts.scorers) this.tactics[opts.offense].scorers = opts.scorers;
+    this.tactics[opts.offense].inbounderSlot =
+      opts.inbounderSlot ?? opts.plan?.inbounderSlot ?? null;
+    const defScheme = opts.defScheme ?? opts.defPlan?.defScheme ?? "man";
+    this.tactics[1 - opts.offense].defScheme = defScheme;
     if (this.gameClock < 35) this.gameClock = 35; // room to run the play
     this.emit(
       "info",
-      `LAB — ${this.teams[opts.offense].name} possession against ${Game.SCHEME_LABELS[opts.defScheme]}`,
+      `LAB — ${this.teams[opts.offense].name} possession against ${Game.SCHEME_LABELS[defScheme]}`,
       null
     );
-    const spot = this.labInboundSpot(opts.offense, opts.start ?? "full");
+    const spot = this.labInboundSpot(opts.offense, opts.start ?? opts.plan?.inbound ?? "side-top");
     this.setupInbound(opts.offense, spot, { sc: 24 });
     // drill-style start: snap everyone straight into formation instead
     // of jogging there, so the inbound always looks traditional
@@ -2081,14 +2311,17 @@ export class Game {
     });
   }
 
-  /** Leave lab mode and return to a normally simulated game. */
+  /** Leave lab mode and return to a normally simulated game. Standing
+      coaching plans survive; lab-only staging (inbounder) is dropped. */
   resumeGame() {
     this.lab = null;
     this.frozen = false;
-    this.tactics = [
-      { defScheme: "man", scorers: [], inbounderSlot: null },
-      { defScheme: "man", scorers: [], inbounderSlot: null },
-    ];
+    this.tactics = this.tactics.map((t) => ({
+      defScheme: t.plan?.defScheme ?? "man",
+      scorers: t.plan?.scorerSlots ?? [],
+      inbounderSlot: null,
+      plan: t.plan ?? null,
+    }));
     if (this.labPending) {
       const { team, spot, sc } = this.labPending;
       this.labPending = null;

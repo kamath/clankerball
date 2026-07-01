@@ -8,6 +8,7 @@ import { useGame } from "@/hooks/useGame";
 import type { GameConfig } from "@/lib/types";
 import type { TeamOption } from "@/app/actions";
 import { BoxScore } from "./BoxScore";
+import { CoachPanel } from "./CoachPanel";
 import { Court } from "./Court";
 import { Feed } from "./Feed";
 import { PossessionLab } from "./PossessionLab";
@@ -85,7 +86,6 @@ export function Simulator({ initialConfig, teams }: SimulatorProps) {
           <ScrollArea className="h-[72vh] pr-3">
             <PossessionLab
               teams={game.boxTeams}
-              snapshot={snapshot}
               events={game.labEvents}
               labPhase={game.labPhase}
               labTool={game.labTool}
@@ -95,13 +95,13 @@ export function Simulator({ initialConfig, teams }: SimulatorProps) {
               onReRun={game.reRunLab}
               onToolChange={game.setLabTool}
               onClearPaths={game.clearLabPaths}
-              onSetDefense={game.setLabDefense}
             />
           </ScrollArea>
         ) : (
           <Tabs defaultValue="feed" className="flex flex-col">
-            <TabsList className="grid grid-cols-4">
+            <TabsList className="grid grid-cols-5">
               <TabsTrigger value="feed">Play-by-play</TabsTrigger>
+              <TabsTrigger value="coach">Coach</TabsTrigger>
               <TabsTrigger value="box">Box score</TabsTrigger>
               <TabsTrigger value="edit">Edit</TabsTrigger>
               <TabsTrigger value="teams">Teams</TabsTrigger>
@@ -109,6 +109,16 @@ export function Simulator({ initialConfig, teams }: SimulatorProps) {
 
             <TabsContent value="feed">
               <Feed events={game.events} snapshot={snapshot} />
+            </TabsContent>
+
+            <TabsContent value="coach">
+              <ScrollArea className="h-[60vh] pr-3">
+                <CoachPanel
+                  teams={game.boxTeams}
+                  plans={game.teamPlans}
+                  onApply={game.setTeamPlan}
+                />
+              </ScrollArea>
             </TabsContent>
 
             <TabsContent value="box">

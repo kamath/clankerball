@@ -1,6 +1,7 @@
 /* ============================================================
    types.ts — shared domain types for the simulation
    ============================================================ */
+import type { TeamPlan } from "./plan";
 
 export interface Vec {
   x: number;
@@ -60,6 +61,8 @@ export interface Tactics {
   scorers: number[];
   /** roster slot that throws the inbound (lab mode); null/missing = auto */
   inbounderSlot?: number | null;
+  /** compiled coaching instructions this team is optimizing for */
+  plan?: TeamPlan | null;
 }
 
 /**
@@ -122,6 +125,8 @@ export interface Player extends Ratings {
   slot: number;
   id: number;
   tend: Tendencies;
+  /** tendencies as configured, before any plan bias is layered on */
+  baseTend: Tendencies;
   pos: Vec;
   vel: Vec;
   moveTarget: Vec | null;

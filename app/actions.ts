@@ -11,7 +11,13 @@ import {
   type NbaTeam,
 } from "@/lib/nba/client";
 import { fallbackPlayer, makeScout, ratePlayer } from "@/lib/nba/scout";
+import { compileTeamPlan, type CompileRequest, type CompileResult } from "@/lib/ai/compile";
 import type { GameConfig, PlayerConfig, TeamConfig } from "@/lib/types";
+
+/** Compile a coach's free-text instructions into a TeamPlan (AI Gateway). */
+export async function compilePlan(req: CompileRequest): Promise<CompileResult> {
+  return compileTeamPlan(req);
+}
 
 /** Primary team colors, keyed by abbreviation. */
 const TEAM_COLORS: Record<string, string> = {

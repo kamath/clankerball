@@ -76,6 +76,9 @@ export function RosterEditor({ teams, onEdit }: RosterEditorProps) {
   const setTend = (key: keyof Player["tend"], v: number) => {
     onEdit(sel.ti, sel.slot, (p) => {
       p.tend[key] = v;
+      // keep the base in sync so coaching-plan biases re-apply on top
+      // of the edited value, not the original one
+      if (p.baseTend) p.baseTend[key] = v;
     });
     rerender();
   };

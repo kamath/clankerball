@@ -1,52 +1,30 @@
 "use client";
 /* ============================================================
    PossessionLab — interactive possession designer on a sandboxed
-   game. Pick the team, where it inbounds, who throws it in, the
-   defense it's working against, and your scoring options (a top
-   option plus optional second and third looks). The players snap
-   into formation; while staged you can drag them anywhere and draw
-   the motion paths they run. Run plays the possession and freezes
-   when it ends. The real game is paused and untouched the whole time.
+   game. Pick the offense, then coach both teams in plain language:
+   "pick and roll — Jokic screener, Curry ball handler", "get Steph
+   open", "2-3 zone, gamble for steals". The instructions are
+   compiled (AI Gateway) into a plan the players optimize for, on
+   top of their attributes and tendencies. While staged you can
+   still drag players anywhere and draw the routes they run. Run
+   plays the possession and freezes when it ends; the real game is
+   paused and untouched the whole time.
    ============================================================ */
-import { useEffect, useRef, useState } from "react";
-import { MousePointer2, PenLine, Eraser } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Eraser, Loader2, MousePointer2, PenLine, Wand2 } from "lucide-react";
+import { compilePlan } from "@/app/actions";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { PlanSummary } from "@/components/PlanSummary";
+import { scoutRoster } from "@/lib/roster-scout";
+import type { TeamPlan } from "@/lib/plan";
 import { cn } from "@/lib/utils";
-import type { BoxTeam, LabPhase, LabTool, PossessionOpts, Snapshot } from "@/hooks/useGame";
-import type { DefScheme, InboundLoc, SimEvent } from "@/lib/types";
-
-const SCHEMES: { value: DefScheme; label: string; blurb: string }[] = [
-  { value: "man", label: "Man-to-man", blurb: "stick with your matchup" },
-  { value: "switch", label: "Switch everything", blurb: "trade assignments on every screen" },
-  { value: "zone", label: "2-3 Zone", blurb: "guard your area, pack the paint" },
-];
-
-const INBOUNDS: { value: InboundLoc; label: string }[] = [
-  { value: "full", label: "Full court — baseline" },
-  { value: "side-top", label: "Sideline — top" },
-  { value: "side-bot", label: "Sideline — bottom" },
-  { value: "base-top", label: "Baseline — top (under basket)" },
-  { value: "base-bot", label: "Baseline — bottom (under basket)" },
-];
-
-const OPTION_LABELS = ["Top option", "Second option", "Third option"];
-const OPTION_HINTS = [
-  "your go-to scorer — the offense looks here first",
-  "optional — the next look when the top option is covered",
-  "optional — the third release valve",
-];
+import type { BoxTeam, LabPhase, LabTool, PossessionOpts } from "@/hooks/useGame";
+import type { SimEvent } from "@/lib/types";
 
 interface PossessionLabProps {
   teams: BoxTeam[];
-  snapshot: Snapshot;
   events: SimEvent[];
   labPhase: LabPhase;
   labTool: LabTool;
@@ -56,8 +34,9 @@ interface PossessionLabProps {
   onReRun: () => void;
   onToolChange: (t: LabTool) => void;
   onClearPaths: () => void;
-  onSetDefense: (scheme: DefScheme) => void;
 }
+
+const lastName = (n: string) => n.split(" ").slice(-1)[0];
 
 export function PossessionLab({
   teams,
@@ -70,184 +49,161 @@ export function PossessionLab({
   onReRun,
   onToolChange,
   onClearPaths,
-  onSetDefense,
 }: PossessionLabProps) {
   const [offense, setOffense] = useState(0);
-  const [scheme, setScheme] = useState<DefScheme>("man");
-  const [start, setStart] = useState<InboundLoc>("side-top");
-  // scoring options in priority order: [top, second, third]; null = unset
-  const [scorers, setScorers] = useState<(number | null)[]>([null, null, null]);
-  const [inbounder, setInbounder] = useState<number | "auto">("auto");
-  const [rev, setRev] = useState(0); // bump to re-stage with same options
+  const [offText, setOffText] = useState("");
+  const [defText, setDefText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // the compiled plans currently staged on the court
+  const [plans, setPlans] = useState<{ plan: TeamPlan | null; defPlan: TeamPlan | null }>({
+    plan: null,
+    defPlan: null,
+  });
+  const [rev, setRev] = useState(0); // bump to re-stage with the same plans
 
-  // the defensive scheme rides along on re-stages but must NOT trigger one
-  // (that would re-randomize the offense and wipe authored routes); a ref
-  // carries the latest value into onStage.
-  const schemeRef = useRef(scheme);
-  schemeRef.current = scheme;
-
-  // while configuring, any change to the offensive setup instantly re-stages
-  // the formation. the defense is handled separately (see the scheme select),
-  // so changing it never disturbs the offense. once the lineup is confirmed the
-  // config controls lock, so this never fires under authored moves/paths.
+  // any change to the offense or the compiled plans re-stages a clean
+  // formation. once the play is running the config controls lock.
   useEffect(() => {
-    onStage({
-      offense,
-      defScheme: schemeRef.current,
-      start,
-      scorers: scorers.filter((s): s is number => s !== null),
-      inbounder: inbounder === "auto" ? null : inbounder,
-    });
-  }, [offense, start, scorers, inbounder, rev, onStage]);
+    onStage({ offense, plan: plans.plan, defPlan: plans.defPlan });
+  }, [offense, plans, rev, onStage]);
 
   if (teams.length < 2) return null;
-  // config controls are live whenever the play isn't actively running; changing
-  // one re-stages a clean formation (which resets spots and clears routes)
   const configurable = labPhase !== "running";
   const offTeam = teams[offense];
-  const schemeMeta = SCHEMES.find((s) => s.value === scheme)!;
+  const defTeam = teams[1 - offense];
+  const offNames = offTeam.players.map((bp) => lastName(bp.name));
+  const defNames = defTeam.players.map((bp) => lastName(bp.name));
   const handlerSlot = labRoles.findIndex((r) => r === "HANDLER");
+  const canCompile = offText.trim().length > 0 || defText.trim().length > 0;
 
-  // pick a scoring option, keeping the three slots unique
-  const setScorer = (idx: number, v: number | null) => {
-    setScorers((prev) => {
-      const next = [...prev];
-      if (v !== null) {
-        for (let i = 0; i < next.length; i++) if (next[i] === v) next[i] = null;
-      }
-      next[idx] = v;
-      return next;
-    });
+  const compile = async () => {
+    if (busy || !canCompile) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const offRoster = scoutRoster(offTeam.players.map((bp) => bp.player));
+      const defRoster = scoutRoster(defTeam.players.map((bp) => bp.player));
+      const [off, def] = await Promise.all([
+        offText.trim()
+          ? compilePlan({
+              instructions: offText,
+              teamName: offTeam.name,
+              roster: offRoster,
+              opponentName: defTeam.name,
+              opponentRoster: defRoster,
+              context: "lab-offense",
+            })
+          : Promise.resolve(null),
+        defText.trim()
+          ? compilePlan({
+              instructions: defText,
+              teamName: defTeam.name,
+              roster: defRoster,
+              opponentName: offTeam.name,
+              opponentRoster: offRoster,
+              context: "lab-defense",
+            })
+          : Promise.resolve(null),
+      ]);
+      const failed = [off, def].find((r) => r && !r.ok);
+      if (failed && !failed.ok) setError(failed.error);
+      setPlans({
+        plan: off?.ok ? off.plan : null,
+        defPlan: def?.ok ? def.plan : null,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Compilation failed.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3">
-        <div className="flex flex-col gap-1.5">
-          <Label>Offense</Label>
-          <div className="flex gap-1.5">
-            {teams.map((t, ti) => (
-              <Button
-                key={ti}
-                size="sm"
-                variant={offense === ti ? "secondary" : "outline"}
-                disabled={!configurable}
-                onClick={() => {
-                  setOffense(ti);
-                  setScorers([null, null, null]);
-                  setInbounder("auto");
-                }}
-              >
-                <span className="mr-1.5 size-2.5 rounded-full" style={{ background: t.color }} />
-                {t.name.split(" ")[0]}
-              </Button>
-            ))}
-          </div>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label>Inbound location</Label>
-          <Select
-            value={start}
-            onValueChange={(v) => setStart(v as InboundLoc)}
-            disabled={!configurable}
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {INBOUNDS.map((l) => (
-                <SelectItem key={l.value} value={l.value}>
-                  {l.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+      <div className="flex flex-col gap-1.5">
+        <Label>Offense</Label>
+        <div className="flex gap-1.5">
+          {teams.map((t, ti) => (
+            <Button
+              key={ti}
+              size="sm"
+              variant={offense === ti ? "secondary" : "outline"}
+              disabled={!configurable}
+              onClick={() => {
+                setOffense(ti);
+                // compiled plans reference roster slots of a specific side
+                setPlans({ plan: null, defPlan: null });
+                setError(null);
+              }}
+            >
+              <span className="mr-1.5 size-2.5 rounded-full" style={{ background: t.color }} />
+              {t.name.split(" ")[0]}
+            </Button>
+          ))}
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div className="flex flex-col gap-1.5">
-          <Label>Inbounder</Label>
-          <Select
-            value={String(inbounder)}
-            onValueChange={(v) => setInbounder(v === "auto" ? "auto" : Number(v))}
-            disabled={!configurable}
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">Auto (nearest to the ball)</SelectItem>
-              {offTeam.players.map((bp, slot) => (
-                <SelectItem key={bp.id} value={String(slot)}>
-                  #{bp.number} {bp.name.split(" ").slice(-1)[0]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label>Defense</Label>
-          <Select
-            value={scheme}
-            onValueChange={(v) => {
-              setScheme(v as DefScheme);
-              onSetDefense(v as DefScheme); // re-shape only the defense, in place
+      <div className="flex flex-col gap-1.5">
+        <Label>Offense instructions ({offTeam.name})</Label>
+        <Textarea
+          value={offText}
+          onChange={(e) => setOffText(e.target.value)}
+          disabled={!configurable}
+          rows={3}
+          placeholder={`e.g. "pick and roll — ${offNames[4] ?? "the center"} screener, ${offNames[0] ?? "the point guard"} ball handler", "get ${offNames[0] ?? "your star"} open", "post up ${offNames[4] ?? "the big"}, everyone else space the floor"`}
+        />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label>Defense instructions ({defTeam.name}) — optional</Label>
+        <Textarea
+          value={defText}
+          onChange={(e) => setDefText(e.target.value)}
+          disabled={!configurable}
+          rows={2}
+          placeholder={`e.g. "switch everything", "2-3 zone, ${defNames[4] ?? "the center"} protect the rim", "deny ${offNames[0] ?? "their star"} the ball, gamble for steals"`}
+        />
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button onClick={compile} disabled={!configurable || busy || !canCompile} className="flex-1">
+          {busy ? (
+            <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+          ) : (
+            <Wand2 className="mr-1.5 size-3.5" />
+          )}
+          {busy ? "Compiling…" : "Compile & stage"}
+        </Button>
+        {(plans.plan || plans.defPlan) && (
+          <Button
+            variant="outline"
+            disabled={!configurable || busy}
+            onClick={() => {
+              setPlans({ plan: null, defPlan: null });
+              setError(null);
             }}
-            disabled={!configurable}
           >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {SCHEMES.map((s) => (
-                <SelectItem key={s.value} value={s.value}>
-                  {s.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">{schemeMeta.blurb}</p>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <Label>Scoring options ({offTeam.name})</Label>
-        {OPTION_LABELS.map((label, idx) => (
-          <div key={idx} className="flex flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <span className="w-24 shrink-0 text-sm font-medium">{label}</span>
-              <Select
-                value={scorers[idx] === null ? "none" : String(scorers[idx])}
-                onValueChange={(v) => setScorer(idx, v === "none" ? null : Number(v))}
-                disabled={!configurable}
-              >
-                <SelectTrigger className="h-8 flex-1">
-                  <SelectValue placeholder="None" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">{idx === 0 ? "None (let it flow)" : "None"}</SelectItem>
-                  {offTeam.players.map((bp, slot) => (
-                    <SelectItem key={bp.id} value={String(slot)}>
-                      #{bp.number} {bp.name.split(" ").slice(-1)[0]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <p className="pl-[6.5rem] text-xs text-muted-foreground">{OPTION_HINTS[idx]}</p>
-          </div>
-        ))}
-        {handlerSlot >= 0 && offTeam.players[handlerSlot] && (
-          <p className="text-xs text-muted-foreground">
-            Bringing it up:{" "}
-            <span className="font-medium">
-              #{offTeam.players[handlerSlot].number}{" "}
-              {offTeam.players[handlerSlot].name.split(" ").slice(-1)[0]}
-            </span>
-          </p>
+            Clear plan
+          </Button>
         )}
       </div>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+
+      {plans.plan && (
+        <PlanSummary title={`${offTeam.name} — offense`} plan={plans.plan} names={offNames} />
+      )}
+      {plans.defPlan && (
+        <PlanSummary title={`${defTeam.name} — defense`} plan={plans.defPlan} names={defNames} />
+      )}
+      {handlerSlot >= 0 && offTeam.players[handlerSlot] && (
+        <p className="text-xs text-muted-foreground">
+          Bringing it up:{" "}
+          <span className="font-medium">
+            #{offTeam.players[handlerSlot].number} {lastName(offTeam.players[handlerSlot].name)}
+          </span>
+        </p>
+      )}
 
       <div className="flex flex-col gap-1.5">
         <Label>Court tools</Label>
@@ -280,8 +236,8 @@ export function PossessionLab({
             : labPhase === "running"
               ? "Play in progress — watch the court."
               : labPhase === "ended"
-                ? "Possession over — re-run it, or tweak the setup to restage."
-                : "Drag players and draw their routes, then run the play."}
+                ? "Possession over — re-run it, or tweak the instructions to restage."
+                : "Coach both teams, then run the play."}
         </p>
       </div>
 
@@ -295,7 +251,7 @@ export function PossessionLab({
             Run play
           </Button>
         )}
-        <Button variant="outline" onClick={() => setRev((r) => r + 1)}>
+        <Button variant="outline" onClick={() => setRev((r) => r + 1)} disabled={!configurable}>
           Reset formation
         </Button>
       </div>
