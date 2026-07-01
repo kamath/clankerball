@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  // nodejs_compat gives the `ai` SDK its Node built-ins and (with a compat date
+  // >= 2025-04-01) populates process.env from vars + secrets, which is how
+  // @repo/api reads BALLDONTLIE_API_KEY / AI_GATEWAY_API_KEY.
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  }
+  // Secrets (set with `wrangler secret put <NAME>`, or via .dev.vars locally):
+  //   BALLDONTLIE_API_KEY, AI_GATEWAY_API_KEY, AI_GATEWAY_MODEL, CORS_ORIGIN
+}
