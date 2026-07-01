@@ -11,8 +11,6 @@ import { swaggerUI } from "@hono/swagger-ui";
 import { cors } from "hono/cors";
 import {
   BuildMatchupInputSchema,
-  CompileRequestSchema,
-  CompileResultSchema,
   GameConfigSchema,
   ReplaySchema,
   SimulateRequestSchema,
@@ -20,7 +18,6 @@ import {
   simulatePossession,
 } from "@repo/shared";
 import { buildMatchup, listTeams } from "./lib/teams";
-import { compileTeamPlan } from "./lib/ai/compile";
 
 const ErrorSchema = z.object({ error: z.string() });
 const jsonError = { content: { "application/json": { schema: ErrorSchema } } };
@@ -54,22 +51,6 @@ const matchupRoute = createRoute({
       content: { "application/json": { schema: GameConfigSchema } },
     },
     500: { description: "Upstream/data error", ...jsonError },
-  },
-});
-
-const compileRoute = createRoute({
-  method: "post",
-  path: "/compile",
-  summary: "Compile free-text coaching instructions into a TeamPlan",
-  tags: ["compile"],
-  request: {
-    body: { required: true, content: { "application/json": { schema: CompileRequestSchema } } },
-  },
-  responses: {
-    200: {
-      description: "The compiled plan, or a structured error",
-      content: { "application/json": { schema: CompileResultSchema } },
-    },
   },
 });
 
@@ -125,11 +106,6 @@ const routes = base
     const { teamAId, teamBId, season } = c.req.valid("json");
     const config = await buildMatchup(teamAId, teamBId, season);
     return c.json(GameConfigSchema.parse(config), 200);
-  })
-  .openapi(compileRoute, async (c) => {
-    const req = c.req.valid("json");
-    const result = await compileTeamPlan(req);
-    return c.json(CompileResultSchema.parse(result), 200);
   })
   .openapi(simulateRoute, async (c) => {
     const req = c.req.valid("json");

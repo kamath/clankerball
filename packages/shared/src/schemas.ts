@@ -85,45 +85,9 @@ export const BuildMatchupInputSchema = z.object({
 });
 export type BuildMatchupInput = z.infer<typeof BuildMatchupInputSchema>;
 
-/* ---------- scouting snapshot + plan compilation ---------- */
-
-export const ScoutPlayerSchema = z.object({
-  slot: z.number(),
-  name: z.string(),
-  number: z.number(),
-  pos: z.string(),
-  heightIn: z.number(),
-  ratings: z.object({
-    iq: z.number(),
-    threePoint: z.number(),
-    midRange: z.number(),
-    layup: z.number(),
-    dunk: z.number(),
-    ballHandle: z.number(),
-    passAcc: z.number(),
-    speed: z.number(),
-    strength: z.number(),
-    perimeterD: z.number(),
-    interiorD: z.number(),
-    steal: z.number(),
-    block: z.number(),
-    rebound: z.number(),
-  }),
-  tendencies: TendenciesSchema,
-});
-export type ScoutPlayer = z.infer<typeof ScoutPlayerSchema>;
-
-export const CompileRequestSchema = z.object({
-  instructions: z.string(),
-  teamName: z.string(),
-  roster: z.array(ScoutPlayerSchema),
-  opponentName: z.string(),
-  opponentRoster: z.array(ScoutPlayerSchema),
-  context: z.enum(["lab-offense", "lab-defense", "game"]),
-});
-export type CompileRequest = z.infer<typeof CompileRequestSchema>;
-
-/* The compiled plan, mirroring the TeamPlan interface in ./plan. */
+/* ---------- game plan ----------
+   The TeamPlan a coach builds by hand, mirroring the TeamPlan interface in
+   ./plan. Carried on the wire so a staged possession can be simulated. */
 const slot = z.number();
 export const PlanActionSchema = z.object({
   type: z.enum(["pickAndRoll", "getOpen", "iso", "postUp"]),
@@ -150,12 +114,6 @@ export const TeamPlanSchema = z.object({
   inbound: z.enum(["full", "side-top", "side-bot", "base-top", "base-bot"]).nullable(),
   inbounderSlot: slot.nullable(),
 });
-
-export const CompileResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), plan: TeamPlanSchema }),
-  z.object({ ok: z.literal(false), error: z.string() }),
-]);
-export type CompileResult = z.infer<typeof CompileResultSchema>;
 
 /* ---------- possession simulation: request + recorded replay ----------
    A staged lab possession is simulated on the backend Worker; the request

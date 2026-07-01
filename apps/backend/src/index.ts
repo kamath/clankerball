@@ -8,8 +8,6 @@
    Env (wrangler secrets / .dev.vars, exposed via process.env with
    the nodejs_compat flag):
      BALLDONTLIE_API_KEY  — NBA roster/stats source
-     AI_GATEWAY_API_KEY   — plan compilation (Vercel AI Gateway)
-     AI_GATEWAY_MODEL     — optional model override
      CORS_ORIGIN          — optional comma-separated allowlist
    ============================================================ */
 import { Hono } from "hono";

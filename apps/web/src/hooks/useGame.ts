@@ -113,9 +113,6 @@ export function useGame(initialConfig: GameConfig) {
   // resolved on-court role label per offensive roster slot (HANDLER, SPACE…)
   const [labRoles, setLabRoles] = useState<(string | null)[]>([]);
   const [boxTeams, setBoxTeams] = useState<BoxTeam[]>([]);
-  // standing coaching plans for the real game, re-applied on a new game
-  const plansRef = useRef<(TeamPlan | null)[]>([null, null]);
-  const [teamPlans, setTeamPlans] = useState<(TeamPlan | null)[]>([null, null]);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeedState] = useState(2);
   const [version, setVersion] = useState(0); // bumps when a new game is built
@@ -206,11 +203,7 @@ export function useGame(initialConfig: GameConfig) {
         onEvent: (e) => setEvents((prev) => (prev.length > 250 ? [e, ...prev.slice(0, 250)] : [e, ...prev])),
       });
       gameRef.current = game;
-      // standing instructions carry over into the new game
-      plansRef.current.forEach((plan, ti) => {
-        if (plan) game.setPlan(ti, plan);
-      });
-      // a new game always exits the lab
+      // a fresh roster always drops back to an unstaged lab
       modeRef.current = "game";
       labGameRef.current = null;
       labPhaseRef.current = "idle";
@@ -581,27 +574,6 @@ export function useGame(initialConfig: GameConfig) {
     setLabToolState(t);
   }, []);
 
-  /** Give a team standing coaching instructions for the real game. The
-      engine starts optimizing for them on its next possession; they also
-      carry over to new games. */
-  const setTeamPlan = useCallback((teamIdx: number, plan: TeamPlan | null) => {
-    plansRef.current[teamIdx] = plan;
-    setTeamPlans([...plansRef.current]);
-    gameRef.current?.setPlan(teamIdx, plan);
-  }, []);
-
-  /** Leave the lab; the real game continues exactly where it was. */
-  const exitLab = useCallback(() => {
-    modeRef.current = "game";
-    labGameRef.current = null;
-    replayingRef.current = false; // switching to the live game stops replay
-    setReplaying(false);
-    setLabPhase("idle");
-    setLabEvents([]);
-    const game = gameRef.current;
-    if (game) setSnapshot(sampleSnapshot(game));
-  }, [sampleSnapshot, setLabPhase]);
-
   /** Mutate a live player's field in place (engine reads the same object). */
   const editPlayer = useCallback((teamIdx: number, slot: number, mutate: (p: Player) => void) => {
     const game = gameRef.current;
@@ -638,11 +610,8 @@ export function useGame(initialConfig: GameConfig) {
     stageLab,
     runLab,
     reRunLab,
-    exitLab,
     clearLabPaths,
     setLabTool,
-    teamPlans,
-    setTeamPlan,
     getConfig: () => configRef.current,
   };
 }

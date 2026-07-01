@@ -49,9 +49,6 @@ const ACTION_TYPES: { value: PlanActionType; label: string }[] = [
   { value: "iso", label: "Iso" },
   { value: "postUp", label: "Post up" },
 ];
-const ALL_TENDS: (keyof Tendencies)[] = [
-  "shoot", "three", "drive", "pass", "kickout", "help", "crash", "gamble",
-];
 // which tendencies matter on each end — the defense editor shouldn't offer
 // shot-hunting biases, and the offense editor shouldn't offer help/gamble.
 const OFF_TENDS: (keyof Tendencies)[] = ["shoot", "three", "drive", "pass", "kickout", "crash"];
@@ -99,8 +96,8 @@ function SlotSelect({
 
 interface PlanEditorProps {
   names: string[];
-  /** lab contexts expose the inbound controls; game hides them */
-  context: "game" | "lab-offense" | "lab-defense";
+  /** the offense editor exposes the inbound controls; defense hides them */
+  context: "lab-offense" | "lab-defense";
   /** seed value — the plan the editor opens on */
   initialPlan: TeamPlan | null;
   /** locks every control (e.g. while a possession is running) */
@@ -113,12 +110,11 @@ export function PlanEditor({ names, context, initialPlan, disabled, onApply, cla
   const [draft, setDraft] = useState<TeamPlan>(initialPlan ?? BLANK);
   // context gates which sections show: a defense plan has no initiator /
   // scoring options / actions / inbound / tempo, only scheme + emphasis.
-  const showOffense = context !== "lab-defense";
+  const showOffense = context === "lab-offense";
   const showInbound = context === "lab-offense";
-  const showDefScheme = context !== "lab-offense";
-  const showPace = context !== "lab-defense";
-  const tendKeys =
-    context === "lab-offense" ? OFF_TENDS : context === "lab-defense" ? DEF_TENDS : ALL_TENDS;
+  const showDefScheme = context === "lab-defense";
+  const showPace = context === "lab-offense";
+  const tendKeys = context === "lab-offense" ? OFF_TENDS : DEF_TENDS;
   const maxDirectives = Math.min(5, names.length);
 
   const patch = (p: Partial<TeamPlan>) => setDraft((d) => ({ ...d, ...p }));
