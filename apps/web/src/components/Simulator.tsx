@@ -25,7 +25,10 @@ export function Simulator({ initialConfig }: SimulatorProps) {
   const { data: teams = [] } = useTeams();
   const { snapshot } = game;
   const names = snapshot.teamMeta;
-  const [panel, setPanel] = useState<"game" | "lab">("game");
+  // Lab is the default view — the sim opens straight into the possession designer.
+  const [panel, setPanel] = useState<"game" | "lab">("lab");
+  // active sub-tab within the lab panel (designer / roster edit / team picker)
+  const [labTab, setLabTab] = useState("lab");
 
   const showGame = () => {
     setPanel("game");
@@ -83,20 +86,50 @@ export function Simulator({ initialConfig }: SimulatorProps) {
         />
 
         {panel === "lab" ? (
-          <ScrollArea className="h-[72vh] pr-3">
-            <PossessionLab
-              teams={game.boxTeams}
-              events={game.labEvents}
-              labPhase={game.labPhase}
-              labTool={game.labTool}
-              labRoles={game.labRoles}
-              onStage={game.stageLab}
-              onRun={game.runLab}
-              onReRun={game.reRunLab}
-              onToolChange={game.setLabTool}
-              onClearPaths={game.clearLabPaths}
-            />
-          </ScrollArea>
+          <Tabs value={labTab} onValueChange={setLabTab} className="flex flex-col">
+            <TabsList className="grid grid-cols-3">
+              <TabsTrigger value="lab">Play Lab</TabsTrigger>
+              <TabsTrigger value="edit">Edit</TabsTrigger>
+              <TabsTrigger value="teams">Teams</TabsTrigger>
+            </TabsList>
+
+            {/* forceMount keeps the staged possession alive while you peek at the
+                Edit/Teams tabs; a new matchup bumps game.version, which remounts
+                the designer on a fresh formation. */}
+            <TabsContent value="lab" forceMount className="data-[state=inactive]:hidden">
+              <ScrollArea className="h-[68vh] pr-3">
+                <PossessionLab
+                  key={game.version}
+                  teams={game.boxTeams}
+                  events={game.labEvents}
+                  labPhase={game.labPhase}
+                  labTool={game.labTool}
+                  labRoles={game.labRoles}
+                  onStage={game.stageLab}
+                  onRun={game.runLab}
+                  onReRun={game.reRunLab}
+                  onToolChange={game.setLabTool}
+                  onClearPaths={game.clearLabPaths}
+                />
+              </ScrollArea>
+            </TabsContent>
+
+            <TabsContent value="edit">
+              <ScrollArea className="h-[68vh] pr-3">
+                <RosterEditor teams={game.boxTeams} onEdit={game.editPlayer} />
+              </ScrollArea>
+            </TabsContent>
+
+            <TabsContent value="teams">
+              <TeamPicker
+                teams={teams}
+                onLoad={(config) => {
+                  game.newGame(config);
+                  setLabTab("lab");
+                }}
+              />
+            </TabsContent>
+          </Tabs>
         ) : (
           <Tabs defaultValue="feed" className="flex flex-col">
             <TabsList className="grid grid-cols-5">
