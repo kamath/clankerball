@@ -2,10 +2,34 @@
    renderer.ts — canvas renderer for the court and players
    Ported from ui.js with drawing logic preserved exactly.
    ============================================================ */
-import { COURT, type Game } from "./engine";
+import { COURT } from "./engine";
 
 export const SCALE = 10; // px per foot
 export const PAD = 32; // out-of-bounds apron in px
+
+/* The subset of the game state the renderer actually reads. The live `Game`
+   satisfies this structurally, and a replay feeds a lightweight scene built
+   from recorded frames — so both paths share the exact same drawing code. */
+interface SceneVec {
+  x: number;
+  y: number;
+}
+interface ScenePlayer {
+  pos: SceneVec;
+  heightIn: number;
+  number: number;
+  name: string;
+  annotation?: string | null;
+  path?: SceneVec[] | null;
+}
+export interface DrawScene {
+  lab: unknown;
+  teams: { name: string; score: number; color: string; players: ScenePlayer[] }[];
+  ball: { pos: SceneVec; air: number; holder: ScenePlayer | null };
+  phase?: string;
+  inb?: { inbounder: { pos: SceneVec } } | null;
+  over: boolean;
+}
 
 export class Renderer {
   cv: HTMLCanvasElement;
@@ -184,7 +208,7 @@ export class Renderer {
     return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
   }
 
-  draw(game: Game, dt: number) {
+  draw(game: DrawScene, dt: number) {
     this.time += dt;
     const c = this.ctx;
     c.clearRect(0, 0, this.W, this.H);

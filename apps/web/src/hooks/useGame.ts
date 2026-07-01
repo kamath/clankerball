@@ -7,12 +7,54 @@
    ============================================================ */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { COURT, Game, fmtClock } from "@/lib/engine";
-import { PAD, Renderer, SCALE } from "@/lib/renderer";
+import { PAD, Renderer, SCALE, type DrawScene } from "@/lib/renderer";
 import type { TeamPlan } from "@repo/shared";
 import type { GameConfig, Player, SimEvent, Vec } from "@repo/shared";
 
 export type LabPhase = "idle" | "config" | "staged" | "running" | "ended";
 export type LabTool = "move" | "path";
+
+/* ---- Replay: a serializable, frame-by-frame recording of a possession ----
+   The sim uses Math.random() throughout, so a possession can't be reproduced
+   by re-running it. Instead we record the exact position of every player and
+   the ball on each sim tick, plus the scoreboard, and play those frames back. */
+export interface ReplayFrame {
+  /** [x, y] per player, ordered team0 slots 0-4 then team1 slots 0-4 */
+  players: { x: number; y: number }[];
+  /** ball position, elevation, and holder (global player index, -1 if loose) */
+  ball: { x: number; y: number; air: number; holder: number };
+  scores: [number, number];
+  clock: number;
+  shot: number;
+  shotActive: boolean;
+  poss: number;
+  quarter: number;
+  phase: "setup" | "live" | "over";
+  over: boolean;
+}
+export interface ReplayMeta {
+  /** sim seconds represented by each frame */
+  dt: number;
+  teams: {
+    name: string;
+    abbr: string;
+    color: string;
+    players: { number: number; name: string; heightIn: number; annotation: string | null }[];
+  }[];
+}
+export interface Replay {
+  meta: ReplayMeta;
+  frames: ReplayFrame[];
+}
+
+const STEP = 1 / 30; // sim tick length; one recorded frame per tick
+
+const replayQLabel = (quarter: number, over: boolean) => {
+  if (over) return "FINAL";
+  if (quarter <= 4) return "Q" + quarter;
+  const n = quarter - 4;
+  return n > 1 ? "OT" + n : "OT";
+};
 
 export interface Snapshot {
   scores: [number, number];
@@ -77,6 +119,15 @@ export function useGame(initialConfig: GameConfig) {
   const playingRef = useRef(true);
   const speedRef = useRef(2);
   const lastTRef = useRef(0);
+  // recording of the current lab possession: static roster meta + one frame
+  // per sim tick, captured while the staged play runs so it can be replayed
+  // back exactly (the sim is random, so a re-run wouldn't reproduce it).
+  const framesRef = useRef<ReplayFrame[]>([]);
+  const metaRef = useRef<ReplayMeta | null>(null);
+  const hasReplayRef = useRef(false);
+  // replay playback state (playback reuses playingRef/speedRef for pause/speed)
+  const replayingRef = useRef(false);
+  const replayTimeRef = useRef(0);
 
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [events, setEvents] = useState<SimEvent[]>([]);
@@ -92,6 +143,8 @@ export function useGame(initialConfig: GameConfig) {
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeedState] = useState(2);
   const [version, setVersion] = useState(0); // bumps when a new game is built
+  const [replaying, setReplaying] = useState(false);
+  const [hasReplay, setHasReplay] = useState(false); // a recording is available
 
   const sampleSnapshot = useCallback((game: Game): Snapshot => {
     const sc = Math.max(0, Math.ceil(game.shotClock));
@@ -117,6 +170,97 @@ export function useGame(initialConfig: GameConfig) {
     }));
   }, []);
 
+  // static roster info needed to render a recording without the live game
+  const captureMeta = useCallback(
+    (game: Game): ReplayMeta => ({
+      dt: STEP,
+      teams: game.teams.map((t) => ({
+        name: t.name,
+        abbr: t.abbr,
+        color: t.color,
+        players: t.players.map((p) => ({
+          number: p.number,
+          name: p.name,
+          heightIn: p.heightIn,
+          annotation: p.annotation,
+        })),
+      })),
+    }),
+    []
+  );
+
+  // append one frame capturing exactly what's on the court this tick
+  const recordFrame = useCallback((game: Game) => {
+    const all = game.allPlayers();
+    framesRef.current.push({
+      players: all.map((p) => ({ x: p.pos.x, y: p.pos.y })),
+      ball: {
+        x: game.ball.pos.x,
+        y: game.ball.pos.y,
+        air: game.ball.air || 0,
+        holder: game.ball.holder ? all.indexOf(game.ball.holder) : -1,
+      },
+      scores: [game.teams[0].score, game.teams[1].score],
+      clock: game.gameClock,
+      shot: game.shotClock,
+      shotActive: game.shotClockActive,
+      poss: game.possession,
+      quarter: game.quarter,
+      phase: game.phase,
+      over: game.over,
+    });
+  }, []);
+
+  // reconstruct a drawable scene for one recorded frame
+  const buildScene = useCallback((meta: ReplayMeta, fr: ReplayFrame): DrawScene => {
+    const t0 = meta.teams[0].players.length;
+    const players = meta.teams.map((t, ti) =>
+      t.players.map((pp, si) => {
+        const f = fr.players[ti === 0 ? si : t0 + si];
+        return {
+          pos: { x: f.x, y: f.y },
+          heightIn: pp.heightIn,
+          number: pp.number,
+          name: pp.name,
+          annotation: pp.annotation,
+          path: null,
+        };
+      })
+    );
+    const h = fr.ball.holder;
+    const holder = h < 0 ? null : h < t0 ? players[0][h] : players[1][h - t0];
+    return {
+      // truthy so the renderer draws the lab role labels above players
+      lab: {},
+      teams: meta.teams.map((t, ti) => ({
+        name: t.name,
+        score: fr.scores[ti],
+        color: t.color,
+        players: players[ti],
+      })),
+      ball: { pos: { x: fr.ball.x, y: fr.ball.y }, air: fr.ball.air, holder },
+      phase: fr.phase,
+      inb: null,
+      over: fr.over,
+    };
+  }, []);
+
+  const replaySnapshot = useCallback(
+    (meta: ReplayMeta, fr: ReplayFrame): Snapshot => ({
+      scores: fr.scores,
+      qLabel: replayQLabel(fr.quarter, fr.over),
+      clock: fmtClock(fr.clock),
+      shotClock: Math.max(0, Math.ceil(fr.shot)),
+      shotClockActive: fr.shotActive,
+      possession: fr.poss,
+      over: fr.over,
+      labActive: false,
+      labFrozen: false,
+      teamMeta: meta.teams.map((t) => ({ name: t.name, abbr: t.abbr, color: t.color })),
+    }),
+    []
+  );
+
   const newGame = useCallback(
     (config?: GameConfig) => {
       if (config) configRef.current = config;
@@ -137,6 +281,14 @@ export function useGame(initialConfig: GameConfig) {
       setLabPhaseState("idle");
       setLabEvents([]);
       rendererRef.current?.setTeams([cfg.teamA.color, cfg.teamB.color]);
+      // drop any recorded possession from the previous matchup
+      framesRef.current = [];
+      metaRef.current = null;
+      hasReplayRef.current = false;
+      setHasReplay(false);
+      replayingRef.current = false;
+      replayTimeRef.current = 0;
+      setReplaying(false);
       setSnapshot(sampleSnapshot(game));
       setBoxTeams(sampleBox(game));
       setVersion((v) => v + 1);
@@ -257,18 +409,50 @@ export function useGame(initialConfig: GameConfig) {
       const real = Math.min(0.1, (now - last) / 1000);
       lastTRef.current = now;
 
+      // ---- Replay: play recorded frames back, no simulation ----
+      if (replayingRef.current) {
+        const meta = metaRef.current;
+        const frames = framesRef.current;
+        if (meta && frames.length) {
+          if (playingRef.current) replayTimeRef.current += real * speedRef.current;
+          let idx = Math.floor(replayTimeRef.current / meta.dt);
+          if (idx >= frames.length - 1) {
+            idx = frames.length - 1;
+            if (playingRef.current) {
+              playingRef.current = false; // hold on the final frame
+              setPlaying(false);
+            }
+          }
+          const fr = frames[idx];
+          renderer.draw(buildScene(meta, fr), real);
+          snapAccum += real;
+          if (snapAccum > 0.1) {
+            snapAccum = 0;
+            setSnapshot(replaySnapshot(meta, fr));
+          }
+        }
+        return;
+      }
+
       if (playingRef.current && !game.over) {
         let sim = real * speedRef.current;
         while (sim > 0) {
           const s = Math.min(sim, 1 / 30);
           game.step(s);
+          // record the possession as the staged lab play runs
+          if (inLab && labPhaseRef.current === "running") recordFrame(game);
           sim -= s;
         }
       }
-      // the lab possession just ended (engine froze itself)
+      // the lab possession just ended (engine froze itself) — its recording
+      // is now a complete, replayable clip
       if (inLab && game.frozen && labPhaseRef.current === "running") {
         labPhaseRef.current = "ended";
         setLabPhaseState("ended");
+        if (framesRef.current.length > 0) {
+          hasReplayRef.current = true;
+          setHasReplay(true);
+        }
       }
       renderer.draw(game, real);
 
@@ -286,11 +470,40 @@ export function useGame(initialConfig: GameConfig) {
     };
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [sampleSnapshot, sampleBox]);
+  }, [sampleSnapshot, sampleBox, recordFrame, buildScene, replaySnapshot]);
 
   const togglePlay = useCallback(() => {
+    // hitting play on a replay that has run to the end restarts it
+    if (replayingRef.current && !playingRef.current && metaRef.current) {
+      const end = (framesRef.current.length - 1) * metaRef.current.dt;
+      if (replayTimeRef.current >= end) replayTimeRef.current = 0;
+    }
     playingRef.current = !playingRef.current;
     setPlaying(playingRef.current);
+  }, []);
+
+  /** Restart playback of the recorded possession from its first frame. */
+  const replay = useCallback(() => {
+    if (!metaRef.current || framesRef.current.length === 0) return;
+    replayTimeRef.current = 0;
+    replayingRef.current = true;
+    setReplaying(true);
+    playingRef.current = true;
+    setPlaying(true);
+    setSnapshot(replaySnapshot(metaRef.current, framesRef.current[0]));
+  }, [replaySnapshot]);
+
+  /** Download the recorded possession (roster + every frame) as JSON. */
+  const exportReplay = useCallback(() => {
+    if (!metaRef.current || framesRef.current.length === 0) return;
+    const data: Replay = { meta: metaRef.current, frames: framesRef.current };
+    const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "possession.json";
+    a.click();
+    URL.revokeObjectURL(url);
   }, []);
 
   const setSpeed = useCallback((s: number) => {
@@ -310,6 +523,11 @@ export function useGame(initialConfig: GameConfig) {
       spots and clears the routes; the defense re-shapes in place. */
   const stageLab = useCallback(
     (opts: PossessionOpts) => {
+      replayingRef.current = false; // entering the lab leaves any replay
+      setReplaying(false);
+      framesRef.current = []; // a fresh formation invalidates the old recording
+      hasReplayRef.current = false;
+      setHasReplay(false);
       labReadyRef.current = false; // mute events until the play actually runs
       labSetupRef.current = null; // a fresh stage drops any captured re-run
       const lab = new Game(configRef.current, {
@@ -333,6 +551,20 @@ export function useGame(initialConfig: GameConfig) {
     [sampleSnapshot, setLabPhase]
   );
 
+  /** Reset the recorder and snapshot the lab roster (with resolved roles) so
+      the run that's about to play out is captured from its first frame. */
+  const beginRecording = useCallback(() => {
+    const lab = labGameRef.current;
+    if (!lab) return;
+    framesRef.current = [];
+    metaRef.current = captureMeta(lab);
+    hasReplayRef.current = false;
+    setHasReplay(false);
+    replayingRef.current = false;
+    replayTimeRef.current = 0;
+    setReplaying(false);
+  }, [captureMeta]);
+
   /** Let the staged possession play out, remembering the exact setup first so
       it can be re-run. */
   const runLab = useCallback(() => {
@@ -341,10 +573,11 @@ export function useGame(initialConfig: GameConfig) {
     labSetupRef.current = lab.labCaptureSetup();
     labReadyRef.current = true;
     lab.frozen = false;
+    beginRecording();
     setLabPhase("running");
     playingRef.current = true;
     setPlaying(true);
-  }, [setLabPhase]);
+  }, [setLabPhase, beginRecording]);
 
   /** Run the exact same play again from the spots and routes you authored. */
   const reRunLab = useCallback(() => {
@@ -355,11 +588,12 @@ export function useGame(initialConfig: GameConfig) {
     setLabRoles(lab.teams[setup.labTeam].players.map((p) => p.annotation));
     setLabEvents([]);
     labReadyRef.current = true;
+    beginRecording();
     setLabPhase("running");
     playingRef.current = true;
     setPlaying(true);
     setSnapshot(sampleSnapshot(lab));
-  }, [sampleSnapshot, setLabPhase]);
+  }, [sampleSnapshot, setLabPhase, beginRecording]);
 
   /** Erase all authored motion paths on the staged formation. */
   const clearLabPaths = useCallback(() => {
@@ -391,6 +625,8 @@ export function useGame(initialConfig: GameConfig) {
   const exitLab = useCallback(() => {
     modeRef.current = "game";
     labGameRef.current = null;
+    replayingRef.current = false; // switching to the live game stops replay
+    setReplaying(false);
     setLabPhase("idle");
     setLabEvents([]);
     const game = gameRef.current;
@@ -421,6 +657,10 @@ export function useGame(initialConfig: GameConfig) {
     playing,
     speed,
     version,
+    replaying,
+    hasReplay,
+    replay,
+    exportReplay,
     newGame,
     togglePlay,
     setSpeed,

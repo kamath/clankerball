@@ -78,11 +78,10 @@ export function Simulator({ initialConfig }: SimulatorProps) {
             canvasRef={game.canvasRef}
             playing={game.playing}
             speed={game.speed}
+            canReplay={game.hasReplay}
             onTogglePlay={game.togglePlay}
-            onNewGame={() => {
-              setPanel("game");
-              game.newGame();
-            }}
+            onReplay={game.replay}
+            onExport={game.exportReplay}
             onSetSpeed={game.setSpeed}
           />
           <Feed

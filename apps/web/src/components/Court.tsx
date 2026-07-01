@@ -1,5 +1,5 @@
 "use client";
-import { Pause, Play, RotateCcw } from "lucide-react";
+import { Download, Pause, Play, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const SPEEDS = [1, 2, 4, 8, 16];
@@ -8,8 +8,11 @@ interface CourtProps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   playing: boolean;
   speed: number;
+  /** a recording exists — enables Replay / Export */
+  canReplay: boolean;
   onTogglePlay: () => void;
-  onNewGame: () => void;
+  onReplay: () => void;
+  onExport: () => void;
   onSetSpeed: (s: number) => void;
 }
 
@@ -17,8 +20,10 @@ export function Court({
   canvasRef,
   playing,
   speed,
+  canReplay,
   onTogglePlay,
-  onNewGame,
+  onReplay,
+  onExport,
   onSetSpeed,
 }: CourtProps) {
   return (
@@ -42,9 +47,19 @@ export function Court({
             </Button>
           ))}
         </div>
-        <Button onClick={onNewGame} variant="outline" className="gap-2">
+        <Button onClick={onReplay} variant="outline" className="gap-2" disabled={!canReplay}>
           <RotateCcw data-icon="inline-start" />
-          New Game
+          Replay
+        </Button>
+        <Button
+          onClick={onExport}
+          variant="ghost"
+          className="gap-2"
+          disabled={!canReplay}
+          title="Download this game as a replay file"
+        >
+          <Download data-icon="inline-start" />
+          Export
         </Button>
       </div>
     </div>
