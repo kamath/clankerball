@@ -4,15 +4,16 @@
   "private": true,
   "packageManager": "pnpm@10.26.2",
   "scripts": {
-    "dev": "pnpm --parallel --filter @repo/web --filter @repo/backend dev",
-    "dev:web": "pnpm --filter @repo/web dev",
-    "dev:backend": "pnpm --filter @repo/backend dev",
-    "build": "pnpm --filter @repo/web build",
-    "preview": "pnpm --filter @repo/web preview",
-    "deploy:backend": "pnpm --filter @repo/backend deploy",
-    "typecheck": "pnpm -r --if-present typecheck"
+    "dev": "turbo run dev",
+    "dev:web": "turbo run dev --filter=@repo/web",
+    "dev:backend": "turbo run dev --filter=@repo/backend",
+    "build": "turbo run build",
+    "preview": "turbo run preview --filter=@repo/web",
+    "deploy:backend": "turbo run deploy --filter=@repo/backend",
+    "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
+    "turbo": "^2.3.3",
     "typescript": "^5.7.3"
   },
   "pnpm": {
