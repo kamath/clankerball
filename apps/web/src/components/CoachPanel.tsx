@@ -13,7 +13,9 @@ import { useCompilePlan } from "@/lib/queries";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PlanSummary } from "@/components/PlanSummary";
+import { PlanEditor } from "@/components/PlanEditor";
 import { scoutRoster, type TeamPlan } from "@repo/shared";
 import type { BoxTeam } from "@/hooks/useGame";
 
@@ -38,6 +40,9 @@ function TeamCoach({
 }) {
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState("ai");
+  // bumped whenever we (re-)enter Build so the editor re-seeds from the live plan
+  const [buildSeed, setBuildSeed] = useState(0);
   const compile = useCompilePlan();
   const busy = compile.isPending;
   const names = team.players.map((bp) => lastName(bp.name));
@@ -67,29 +72,54 @@ function TeamCoach({
         <span className="size-2.5 rounded-full" style={{ background: team.color }} />
         <Label className="font-semibold">{team.name}</Label>
       </div>
-      <Textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        rows={2}
-        placeholder={`e.g. "run everything through ${names[0] ?? "your star"}", "switch every screen, push the pace"`}
-      />
-      <div className="flex gap-2">
-        <Button size="sm" onClick={apply} disabled={busy || !text.trim()} className="flex-1">
-          {busy ? (
-            <Loader2 className="mr-1.5 size-3.5 animate-spin" />
-          ) : (
-            <Wand2 className="mr-1.5 size-3.5" />
-          )}
-          {busy ? "Compiling…" : "Apply instructions"}
-        </Button>
-        {plan && (
-          <Button size="sm" variant="outline" onClick={() => onApply(null)}>
-            <X className="mr-1.5 size-3.5" /> Clear
-          </Button>
-        )}
-      </div>
-      {error && <p className="text-xs text-destructive">{error}</p>}
-      {plan && <PlanSummary title="Active plan" plan={plan} names={names} />}
+      <Tabs
+        value={tab}
+        onValueChange={(v) => {
+          if (v === "build") setBuildSeed((s) => s + 1); // re-seed from current plan
+          setTab(v);
+        }}
+      >
+        <TabsList className="grid grid-cols-2">
+          <TabsTrigger value="ai">AI</TabsTrigger>
+          <TabsTrigger value="build">Build by hand</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="ai" className="mt-2 flex flex-col gap-2">
+          <Textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={2}
+            placeholder={`e.g. "run everything through ${names[0] ?? "your star"}", "switch every screen, push the pace"`}
+          />
+          <div className="flex gap-2">
+            <Button size="sm" onClick={apply} disabled={busy || !text.trim()} className="flex-1">
+              {busy ? (
+                <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+              ) : (
+                <Wand2 className="mr-1.5 size-3.5" />
+              )}
+              {busy ? "Compiling…" : "Apply instructions"}
+            </Button>
+            {plan && (
+              <Button size="sm" variant="outline" onClick={() => onApply(null)}>
+                <X className="mr-1.5 size-3.5" /> Clear
+              </Button>
+            )}
+          </div>
+          {error && <p className="text-xs text-destructive">{error}</p>}
+          {plan && <PlanSummary title="Active plan" plan={plan} names={names} />}
+        </TabsContent>
+
+        <TabsContent value="build" className="mt-2">
+          <PlanEditor
+            key={buildSeed}
+            names={names}
+            context="game"
+            initialPlan={plan}
+            onApply={onApply}
+          />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
