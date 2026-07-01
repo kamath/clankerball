@@ -103,11 +103,13 @@ interface PlanEditorProps {
   context: "game" | "lab-offense" | "lab-defense";
   /** seed value — the plan the editor opens on */
   initialPlan: TeamPlan | null;
+  /** locks every control (e.g. while a possession is running) */
+  disabled?: boolean;
   onApply: (plan: TeamPlan | null) => void;
   className?: string;
 }
 
-export function PlanEditor({ names, context, initialPlan, onApply, className }: PlanEditorProps) {
+export function PlanEditor({ names, context, initialPlan, disabled, onApply, className }: PlanEditorProps) {
   const [draft, setDraft] = useState<TeamPlan>(initialPlan ?? BLANK);
   // context gates which sections show: a defense plan has no initiator /
   // scoring options / actions / inbound / tempo, only scheme + emphasis.
@@ -178,7 +180,7 @@ export function PlanEditor({ names, context, initialPlan, onApply, className }: 
     setDraft((d) => ({ ...d, directives: d.directives.filter((_, j) => j !== i) }));
 
   return (
-    <div className={className}>
+    <fieldset disabled={disabled} className={`m-0 min-w-0 border-0 p-0 ${className ?? ""}`}>
       <div className="flex flex-col gap-4">
         {/* Summary */}
         <Field label="Summary (optional)">
@@ -351,6 +353,7 @@ export function PlanEditor({ names, context, initialPlan, onApply, className }: 
                           min={-40}
                           max={40}
                           step={1}
+                          disabled={disabled}
                           onValueChange={([nv]) => setBias(i, k, nv)}
                           className="flex-1"
                         />
@@ -454,7 +457,7 @@ export function PlanEditor({ names, context, initialPlan, onApply, className }: 
           </Button>
         </div>
       </div>
-    </div>
+    </fieldset>
   );
 }
 

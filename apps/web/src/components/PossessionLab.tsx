@@ -19,13 +19,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PlanSummary } from "@/components/PlanSummary";
 import { PlanEditor } from "@/components/PlanEditor";
-import { scoutRoster, type SimEvent, type TeamPlan } from "@repo/shared";
-import { cn } from "@/lib/utils";
+import { scoutRoster, type TeamPlan } from "@repo/shared";
 import type { BoxTeam, LabPhase, LabTool, PossessionOpts } from "@/hooks/useGame";
 
 interface PossessionLabProps {
   teams: BoxTeam[];
-  events: SimEvent[];
   labPhase: LabPhase;
   labTool: LabTool;
   labRoles: (string | null)[];
@@ -40,7 +38,6 @@ const lastName = (n: string) => n.split(" ").slice(-1)[0];
 
 export function PossessionLab({
   teams,
-  events,
   labPhase,
   labTool,
   labRoles,
@@ -221,6 +218,7 @@ export function PossessionLab({
               names={offNames}
               context="lab-offense"
               initialPlan={plans.plan}
+              disabled={!configurable}
               onApply={(plan) => setPlans((p) => ({ ...p, plan }))}
             />
           </div>
@@ -231,6 +229,7 @@ export function PossessionLab({
               names={defNames}
               context="lab-defense"
               initialPlan={plans.defPlan}
+              disabled={!configurable}
               onApply={(defPlan) => setPlans((p) => ({ ...p, defPlan }))}
             />
           </div>
@@ -295,28 +294,6 @@ export function PossessionLab({
           Reset formation
         </Button>
       </div>
-
-      {(labPhase === "running" || labPhase === "ended") && (
-        <div className="flex flex-col gap-1.5">
-          <Label>Possession play-by-play</Label>
-          <div className="flex flex-col rounded-md border">
-            {events.length === 0 && (
-              <div className="px-3 py-2 text-sm text-muted-foreground">Ball is in…</div>
-            )}
-            {events.map((e, i) => (
-              <div
-                key={i}
-                className={cn(
-                  "px-3 py-1.5 text-sm",
-                  (e.type === "pass" || e.type === "info") && "text-muted-foreground"
-                )}
-              >
-                {e.text}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

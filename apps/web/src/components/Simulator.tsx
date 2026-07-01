@@ -73,17 +73,25 @@ export function Simulator({ initialConfig }: SimulatorProps) {
       <Scorebug snapshot={snapshot} />
 
       <main className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_420px]">
-        <Court
-          canvasRef={game.canvasRef}
-          playing={game.playing}
-          speed={game.speed}
-          onTogglePlay={game.togglePlay}
-          onNewGame={() => {
-            setPanel("game");
-            game.newGame();
-          }}
-          onSetSpeed={game.setSpeed}
-        />
+        <div className="flex flex-col gap-4">
+          <Court
+            canvasRef={game.canvasRef}
+            playing={game.playing}
+            speed={game.speed}
+            onTogglePlay={game.togglePlay}
+            onNewGame={() => {
+              setPanel("game");
+              game.newGame();
+            }}
+            onSetSpeed={game.setSpeed}
+          />
+          <Feed
+            events={panel === "lab" ? game.labEvents : game.events}
+            snapshot={snapshot}
+            title={panel === "lab" ? "Possession play-by-play" : "Play-by-play"}
+            className="h-[220px]"
+          />
+        </div>
 
         {panel === "lab" ? (
           <Tabs value={labTab} onValueChange={setLabTab} className="flex flex-col">
@@ -101,7 +109,6 @@ export function Simulator({ initialConfig }: SimulatorProps) {
                 <PossessionLab
                   key={game.version}
                   teams={game.boxTeams}
-                  events={game.labEvents}
                   labPhase={game.labPhase}
                   labTool={game.labTool}
                   labRoles={game.labRoles}
@@ -131,18 +138,13 @@ export function Simulator({ initialConfig }: SimulatorProps) {
             </TabsContent>
           </Tabs>
         ) : (
-          <Tabs defaultValue="feed" className="flex flex-col">
-            <TabsList className="grid grid-cols-5">
-              <TabsTrigger value="feed">Play-by-play</TabsTrigger>
+          <Tabs defaultValue="coach" className="flex flex-col">
+            <TabsList className="grid grid-cols-4">
               <TabsTrigger value="coach">Coach</TabsTrigger>
               <TabsTrigger value="box">Box score</TabsTrigger>
               <TabsTrigger value="edit">Edit</TabsTrigger>
               <TabsTrigger value="teams">Teams</TabsTrigger>
             </TabsList>
-
-            <TabsContent value="feed">
-              <Feed events={game.events} snapshot={snapshot} />
-            </TabsContent>
 
             <TabsContent value="coach">
               <ScrollArea className="h-[60vh] pr-3">
