@@ -2,7 +2,7 @@
    renderer.ts — canvas renderer for the court and players
    Ported from ui.js with drawing logic preserved exactly.
    ============================================================ */
-import { COURT } from "./engine";
+import { COURT } from "@repo/shared";
 
 export const SCALE = 10; // px per foot
 export const PAD = 32; // out-of-bounds apron in px

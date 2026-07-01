@@ -27,6 +27,7 @@ interface PossessionLabProps {
   labPhase: LabPhase;
   labTool: LabTool;
   labRoles: (string | null)[];
+  simulating: boolean;
   onStage: (opts: PossessionOpts) => void;
   onRun: () => void;
   onReRun: () => void;
@@ -41,6 +42,7 @@ export function PossessionLab({
   labPhase,
   labTool,
   labRoles,
+  simulating,
   onStage,
   onRun,
   onReRun,
@@ -282,15 +284,23 @@ export function PossessionLab({
 
       <div className="flex gap-2">
         {labPhase === "ended" ? (
-          <Button onClick={onReRun} className="flex-1">
-            Re-run play
+          <Button onClick={onReRun} disabled={simulating} className="flex-1">
+            {simulating ? "Simulating…" : "Re-run play"}
           </Button>
         ) : (
-          <Button onClick={onRun} disabled={labPhase !== "staged"} className="flex-1">
-            Run play
+          <Button
+            onClick={onRun}
+            disabled={labPhase !== "staged" || simulating}
+            className="flex-1"
+          >
+            {simulating ? "Simulating…" : "Run play"}
           </Button>
         )}
-        <Button variant="outline" onClick={() => setRev((r) => r + 1)} disabled={!configurable}>
+        <Button
+          variant="outline"
+          onClick={() => setRev((r) => r + 1)}
+          disabled={!configurable || simulating}
+        >
           Reset formation
         </Button>
       </div>

@@ -6,7 +6,7 @@
 
    Ported from the original engine.js with logic preserved exactly.
    ============================================================ */
-import type { PlanAction, TeamPlan } from "@repo/shared";
+import type { PlanAction, TeamPlan } from "./plan";
 import type {
   DefScheme,
   GameConfig,
@@ -20,7 +20,7 @@ import type {
   Tactics,
   TeamRuntime,
   Vec,
-} from "@repo/shared";
+} from "./types";
 
 export const COURT = { W: 94, H: 50, HOOP_X: 5.25, ARC: 23.75 };
 

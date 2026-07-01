@@ -14,7 +14,10 @@ import {
   CompileRequestSchema,
   CompileResultSchema,
   GameConfigSchema,
+  ReplaySchema,
+  SimulateRequestSchema,
   TeamOptionSchema,
+  simulatePossession,
 } from "@repo/shared";
 import { buildMatchup, listTeams } from "./lib/teams";
 import { compileTeamPlan } from "./lib/ai/compile";
@@ -70,6 +73,23 @@ const compileRoute = createRoute({
   },
 });
 
+const simulateRoute = createRoute({
+  method: "post",
+  path: "/simulate",
+  summary: "Run a staged lab possession headlessly and return its replay",
+  tags: ["simulate"],
+  request: {
+    body: { required: true, content: { "application/json": { schema: SimulateRequestSchema } } },
+  },
+  responses: {
+    200: {
+      description: "A frame-by-frame recording of the simulated possession",
+      content: { "application/json": { schema: ReplaySchema } },
+    },
+    500: { description: "Simulation error", ...jsonError },
+  },
+});
+
 /* ---------- app ---------- */
 const base = new OpenAPIHono({
   // Surface zod validation failures as clean 400s.
@@ -110,6 +130,11 @@ const routes = base
     const req = c.req.valid("json");
     const result = await compileTeamPlan(req);
     return c.json(CompileResultSchema.parse(result), 200);
+  })
+  .openapi(simulateRoute, async (c) => {
+    const req = c.req.valid("json");
+    const replay = simulatePossession(req);
+    return c.json(ReplaySchema.parse(replay), 200);
   });
 
 /* ---------- OpenAPI document + Swagger UI ----------

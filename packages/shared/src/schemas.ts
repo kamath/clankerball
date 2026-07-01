@@ -7,8 +7,10 @@
    engine; the assertions at the bottom keep the two in lockstep.
    ============================================================ */
 import { z } from "zod";
-import type { GameConfig, PlayerConfig, TeamConfig, Tendencies } from "./types";
+import type { GameConfig, PlayerConfig, TeamConfig, Tendencies, Vec } from "./types";
 import type { TeamPlan } from "./plan";
+import type { LabSetup } from "./engine";
+import type { Replay, ReplayFrame, ReplayMeta, SimulateRequest } from "./replay";
 
 /* ---------- domain: teams, players, matchups ---------- */
 
@@ -155,6 +157,111 @@ export const CompileResultSchema = z.discriminatedUnion("ok", [
 ]);
 export type CompileResult = z.infer<typeof CompileResultSchema>;
 
+/* ---------- possession simulation: request + recorded replay ----------
+   A staged lab possession is simulated on the backend Worker; the request
+   carries everything needed to rebuild it (mirrors stageLab + reRunLab), and
+   the response is a frame-by-frame Replay the client plays back. */
+
+const VecSchema: z.ZodType<Vec> = z.object({ x: z.number(), y: z.number() });
+
+/** Half-court "attack space" spot a dragged player holds while the play runs. */
+const SpotSchema = z.object({
+  ax: z.number(),
+  ay: z.number(),
+  cat: z.enum(["three", "mid", "inside"]),
+});
+
+export const LabSetupSchema = z.object({
+  players: z.array(
+    z.object({
+      team: z.number(),
+      slot: z.number(),
+      pos: VecSchema,
+      moveTarget: VecSchema.nullable(),
+      path: z.array(VecSchema).nullable(),
+      pathHold: z.boolean(),
+    })
+  ),
+  assignTargets: z.array(z.tuple([z.number(), SpotSchema])),
+  inbSpot: VecSchema,
+  inbounderSlot: z.number(),
+  labTeam: z.number(),
+  gameClock: z.number(),
+});
+
+export const SimulateRequestSchema = z.object({
+  config: GameConfigSchema,
+  offense: z.number(),
+  plan: TeamPlanSchema.nullable(),
+  defPlan: TeamPlanSchema.nullable(),
+  setup: LabSetupSchema,
+});
+
+export const ReplayMetaSchema = z.object({
+  dt: z.number(),
+  teams: z.array(
+    z.object({
+      name: z.string(),
+      abbr: z.string(),
+      color: z.string(),
+      players: z.array(
+        z.object({
+          number: z.number(),
+          name: z.string(),
+          heightIn: z.number(),
+          annotation: z.string().nullable(),
+        })
+      ),
+    })
+  ),
+});
+
+export const ReplayFrameSchema = z.object({
+  players: z.array(z.object({ x: z.number(), y: z.number() })),
+  ball: z.object({
+    x: z.number(),
+    y: z.number(),
+    air: z.number(),
+    holder: z.number(),
+  }),
+  scores: z.tuple([z.number(), z.number()]),
+  clock: z.number(),
+  shot: z.number(),
+  shotActive: z.boolean(),
+  poss: z.number(),
+  quarter: z.number(),
+  phase: z.enum(["setup", "live", "over"]),
+  over: z.boolean(),
+});
+
+export const SimEventSchema = z.object({
+  type: z.enum([
+    "period",
+    "final",
+    "score",
+    "dunk",
+    "miss",
+    "block",
+    "steal",
+    "turnover",
+    "rebound",
+    "recover",
+    "loose",
+    "pass",
+    "info",
+  ]),
+  text: z.string(),
+  team: z.number().nullable(),
+  qLabel: z.string(),
+  clock: z.string(),
+});
+
+export const ReplaySchema = z.object({
+  meta: ReplayMetaSchema,
+  frames: z.array(ReplayFrameSchema),
+  events: z.array(SimEventSchema),
+});
+
 /* ---------- drift guards: schema inference must match the hand-written
    interfaces the engine relies on. These are compile-time only. ---------- */
 type Assert<T extends true> = T;
@@ -169,3 +276,13 @@ type _C = Assert<Extends<z.infer<typeof TeamConfigSchema>, TeamConfig>>;
 type _G = Assert<Extends<z.infer<typeof GameConfigSchema>, GameConfig>>;
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _L = Assert<Extends<z.infer<typeof TeamPlanSchema>, TeamPlan>>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _LS = Assert<Extends<z.infer<typeof LabSetupSchema>, LabSetup>>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _SR = Assert<Extends<z.infer<typeof SimulateRequestSchema>, SimulateRequest>>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _RM = Assert<Extends<z.infer<typeof ReplayMetaSchema>, ReplayMeta>>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _RF = Assert<Extends<z.infer<typeof ReplayFrameSchema>, ReplayFrame>>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _RP = Assert<Extends<z.infer<typeof ReplaySchema>, Replay>>;

@@ -111,6 +111,7 @@ export function Simulator({ initialConfig }: SimulatorProps) {
                   labPhase={game.labPhase}
                   labTool={game.labTool}
                   labRoles={game.labRoles}
+                  simulating={game.simulating}
                   onStage={game.stageLab}
                   onRun={game.runLab}
                   onReRun={game.reRunLab}

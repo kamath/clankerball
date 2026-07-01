@@ -10,7 +10,7 @@
    ============================================================ */
 "use client";
 import { createApiClient } from "@repo/api/client";
-import type { BuildMatchupInput, CompileRequest } from "@repo/shared";
+import type { BuildMatchupInput, CompileRequest, SimulateRequest } from "@repo/shared";
 
 /** Origin of the backend Worker that hosts the API. The /api base path is
     baked into the route types, so this is just the origin. Configure per
@@ -48,4 +48,12 @@ export async function fetchCompiledPlan(input: CompileRequest) {
   const res = await api.api.compile.$post({ json: input });
   if (!res.ok) throw await toError(res);
   return res.json(); // inferred: CompileResult
+}
+
+/** Run a staged lab possession on the backend Worker; returns the recorded
+    Replay ({ meta, frames }) for the client to play back. */
+export async function fetchSimulation(input: SimulateRequest) {
+  const res = await api.api.simulate.$post({ json: input });
+  if (!res.ok) throw await toError(res);
+  return res.json(); // inferred: Replay
 }
