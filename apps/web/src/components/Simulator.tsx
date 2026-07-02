@@ -1,11 +1,11 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Check, Share2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { useGame } from "@/hooks/useGame";
-import { useBuildMatchup, useTeams } from "@/lib/queries";
+import { useTeams } from "@/lib/queries";
 import { savePlay } from "@/lib/api";
 import type { GameConfig, PlayerConfig, SimulateRequest } from "@repo/shared";
 import { Court } from "./Court";
@@ -40,29 +40,6 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
   );
   // share-link state: idle → the saved /play/{id} url once copied
   const [shareStatus, setShareStatus] = useState<"idle" | "saving" | "copied">("idle");
-
-  // Default matchup: the sim boots on the curated placeholder for an instant
-  // render, then swaps in the real Spurs vs Knicks rosters once the NBA team
-  // list is available. Skipped when a shared play seeds its own config.
-  const autoMatchup = useBuildMatchup();
-  const autoLoaded = useRef(false);
-  useEffect(() => {
-    if (autoLoaded.current || initialPlay || teams.length === 0) return;
-    const spurs = teams.find((t) => t.abbr === "SAS");
-    const knicks = teams.find((t) => t.abbr === "NYK");
-    if (!spurs || !knicks) return;
-    autoLoaded.current = true;
-    autoMatchup
-      .mutateAsync({ teamAId: spurs.id, teamBId: knicks.id })
-      .then((config) => {
-        game.newGame(config);
-        setRosters(rostersOf(config));
-      })
-      .catch(() => {
-        autoLoaded.current = false; // let a later teams refresh retry
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teams, initialPlay]);
 
   const onShare = async () => {
     const play = game.capturePlay();
