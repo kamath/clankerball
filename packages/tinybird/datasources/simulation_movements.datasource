@@ -1,0 +1,24 @@
+DESCRIPTION >
+    The sequence of movements for a simulated possession, one row per entity
+    per frame. Entities are the ten players (entity = 'player') and the ball
+    (entity = 'ball'). Ordered playback is reconstructed with ORDER BY frame;
+    a single player's trajectory is read by filtering team + slot. `sim_time`
+    is the elapsed sim-seconds of the frame (frame * dt).
+
+SCHEMA >
+    `sim_id` String `json:$.sim_id`,
+    `timestamp` DateTime64(3) `json:$.timestamp`,
+    `frame` UInt32 `json:$.frame`,
+    `sim_time` Float32 `json:$.sim_time`,
+    `entity` LowCardinality(String) `json:$.entity`,
+    `team` Int8 `json:$.team`,
+    `slot` Int8 `json:$.slot`,
+    `player_number` Int16 `json:$.player_number`,
+    `player_name` String `json:$.player_name`,
+    `x` Float32 `json:$.x`,
+    `y` Float32 `json:$.y`,
+    `air` Float32 `json:$.air`,
+    `has_ball` UInt8 `json:$.has_ball`
+
+ENGINE "MergeTree"
+ENGINE_SORTING_KEY "sim_id, frame, entity, team, slot"

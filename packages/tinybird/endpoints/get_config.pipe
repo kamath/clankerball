@@ -1,0 +1,32 @@
+DESCRIPTION >
+    The configuration a single simulation was run with, by sim id. Returns the
+    flattened summary columns plus the verbatim `config`, `plan`, `def_plan`
+    and `setup` JSON — everything needed to say exactly what was simulated and
+    to reproduce it.
+
+NODE config
+SQL >
+    %
+    SELECT
+        sim_id,
+        timestamp,
+        offense,
+        team_a_name,
+        team_a_abbr,
+        team_b_name,
+        team_b_abbr,
+        def_scheme,
+        quarter_minutes,
+        frame_count,
+        event_count,
+        final_score_a,
+        final_score_b,
+        config,
+        plan,
+        def_plan,
+        setup
+    FROM simulation_runs
+    WHERE sim_id = {{String(id, '', required=True)}}
+    LIMIT 1
+
+TYPE endpoint

@@ -1,0 +1,28 @@
+DESCRIPTION >
+    The sequence of movements for one simulation, in playback order. Pass `id`
+    (the sim id). Optionally filter to a single `entity_filter` ('player' or
+    'ball'), or to one player with `team_filter` + `slot_filter`.
+
+NODE movements
+SQL >
+    %
+    SELECT
+        frame,
+        sim_time,
+        entity,
+        team,
+        slot,
+        player_number,
+        player_name,
+        x,
+        y,
+        air,
+        has_ball
+    FROM simulation_movements
+    WHERE sim_id = {{String(id, '', required=True)}}
+        {% if defined(entity_filter) %} AND entity = {{String(entity_filter)}} {% end %}
+        {% if defined(team_filter) %} AND team = {{Int8(team_filter)}} {% end %}
+        {% if defined(slot_filter) %} AND slot = {{Int8(slot_filter)}} {% end %}
+    ORDER BY frame ASC, entity ASC, team ASC, slot ASC
+
+TYPE endpoint

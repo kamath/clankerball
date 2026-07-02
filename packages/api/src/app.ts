@@ -17,6 +17,7 @@ import {
   TeamOptionSchema,
   simulatePossession,
 } from "@repo/shared";
+import { ingestSimulation } from "@repo/tinybird";
 import { buildMatchup, listTeams } from "./lib/teams";
 
 const ErrorSchema = z.object({ error: z.string() });
@@ -178,6 +179,22 @@ const routes = base
   .openapi(simulateRoute, async (c) => {
     const req = c.req.valid("json");
     const replay = simulatePossession(req);
+    // Best-effort analytics: record what was simulated — the config, the
+    // movement sequence, and the play-by-play — to Tinybird. Fire-and-forget
+    // via waitUntil so it never blocks or fails the response, and no-op when
+    // TINYBIRD_* aren't configured (e.g. local dev).
+    const host = process.env.TINYBIRD_HOST;
+    const token = process.env.TINYBIRD_TOKEN;
+    if (host && token) {
+      const ingest = ingestSimulation({ host, token }, req, replay).catch(
+        (err) => console.error("Tinybird ingest failed:", err)
+      );
+      try {
+        c.executionCtx.waitUntil(ingest);
+      } catch {
+        // No execution context outside a Worker — let it run detached.
+      }
+    }
     return c.json(ReplaySchema.parse(replay), 200);
   })
   .openapi(savePlayRoute, async (c) => {

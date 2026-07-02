@@ -1,0 +1,8 @@
+{
+  "dev_mode": "local",
+  "include": [
+    "datasources",
+    "endpoints",
+    "fixtures"
+  ]
+}

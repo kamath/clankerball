@@ -19,4 +19,7 @@
   ]
   // Secrets (set with `wrangler secret put <NAME>`, or via .dev.vars locally):
   //   BALLDONTLIE_API_KEY, CORS_ORIGIN
+  //   TINYBIRD_HOST, TINYBIRD_TOKEN — when both are set, POST /api/simulate
+  //   ships the run (config + movements + play-by-play) to Tinybird. Unset =
+  //   ingestion is skipped. See packages/tinybird/README.md.
 }

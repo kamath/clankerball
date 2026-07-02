@@ -1,0 +1,28 @@
+DESCRIPTION >
+    One row per simulated possession. Captures the exact configuration the
+    simulation was run with — rosters, tactics/plans, and the staged setup —
+    plus a summary of the outcome, so any run can be described and replayed.
+    The full config, plan, def_plan and setup are stored verbatim as JSON
+    strings alongside flattened columns used for filtering and display.
+
+SCHEMA >
+    `sim_id` String `json:$.sim_id`,
+    `timestamp` DateTime64(3) `json:$.timestamp`,
+    `offense` UInt8 `json:$.offense`,
+    `team_a_name` String `json:$.team_a_name`,
+    `team_a_abbr` String `json:$.team_a_abbr`,
+    `team_b_name` String `json:$.team_b_name`,
+    `team_b_abbr` String `json:$.team_b_abbr`,
+    `def_scheme` LowCardinality(String) `json:$.def_scheme`,
+    `quarter_minutes` Float32 `json:$.quarter_minutes`,
+    `frame_count` UInt32 `json:$.frame_count`,
+    `event_count` UInt32 `json:$.event_count`,
+    `final_score_a` UInt16 `json:$.final_score_a`,
+    `final_score_b` UInt16 `json:$.final_score_b`,
+    `config` String `json:$.config`,
+    `plan` String `json:$.plan`,
+    `def_plan` String `json:$.def_plan`,
+    `setup` String `json:$.setup`
+
+ENGINE "MergeTree"
+ENGINE_SORTING_KEY "timestamp, sim_id"

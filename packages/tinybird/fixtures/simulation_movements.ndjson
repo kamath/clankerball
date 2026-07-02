@@ -1,0 +1,4 @@
+{"sim_id":"demo000000000001","timestamp":"2026-07-01 10:00:00.000","frame":0,"sim_time":0,"entity":"player","team":0,"slot":0,"player_number":9,"player_name":"Handler","x":25,"y":40,"air":0,"has_ball":1}
+{"sim_id":"demo000000000001","timestamp":"2026-07-01 10:00:00.000","frame":0,"sim_time":0,"entity":"ball","team":-1,"slot":-1,"player_number":-1,"player_name":"","x":25,"y":40,"air":0,"has_ball":0}
+{"sim_id":"demo000000000001","timestamp":"2026-07-01 10:00:00.000","frame":1,"sim_time":0.0333,"entity":"player","team":0,"slot":0,"player_number":9,"player_name":"Handler","x":25.5,"y":39,"air":0,"has_ball":1}
+{"sim_id":"demo000000000001","timestamp":"2026-07-01 10:00:00.000","frame":1,"sim_time":0.0333,"entity":"ball","team":-1,"slot":-1,"player_number":-1,"player_name":"","x":25.5,"y":39,"air":0,"has_ball":0}
