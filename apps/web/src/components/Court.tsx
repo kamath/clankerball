@@ -11,7 +11,7 @@ interface CourtProps {
   speed: number;
   /** a recording exists — enables Replay / Export */
   canReplay: boolean;
-  /** possession lab state, for the Run / Reset controls */
+  /** possession lab state, for the Run control */
   labPhase: LabPhase;
   simulating: boolean;
   onTogglePlay: () => void;
@@ -19,8 +19,6 @@ interface CourtProps {
   onExport: () => void;
   onSetSpeed: (s: number) => void;
   onRun: () => void;
-  onReRun: () => void;
-  onReset: () => void;
 }
 
 export function Court({
@@ -35,10 +33,7 @@ export function Court({
   onExport,
   onSetSpeed,
   onRun,
-  onReRun,
-  onReset,
 }: CourtProps) {
-  const canReset = labPhase === "staged" || labPhase === "ended";
   return (
     <div className="flex flex-col gap-3">
       <canvas ref={canvasRef} className="court-canvas" />
@@ -77,20 +72,13 @@ export function Court({
             </div>
           </>
         )}
-        <div className="ml-auto flex items-center gap-2">
-          {labPhase === "ended" ? (
-            <Button onClick={onReRun} disabled={simulating}>
-              {simulating ? "Simulating…" : "Re-run play"}
-            </Button>
-          ) : (
-            <Button onClick={onRun} disabled={labPhase !== "staged" || simulating}>
+        {labPhase === "staged" && (
+          <div className="ml-auto flex items-center gap-2">
+            <Button onClick={onRun} disabled={simulating}>
               {simulating ? "Simulating…" : "Run play"}
             </Button>
-          )}
-          <Button variant="outline" onClick={onReset} disabled={!canReset || simulating}>
-            Reset formation
-          </Button>
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

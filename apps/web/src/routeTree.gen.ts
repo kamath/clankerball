@@ -9,54 +9,102 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as ConfigRouteImport } from './routes/$config'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ConfigIndexRouteImport } from './routes/$config.index'
 import { Route as PlayPlayIdRouteImport } from './routes/play.$playId'
+import { Route as ConfigResultsRouteImport } from './routes/$config.results'
 
+const ConfigRoute = ConfigRouteImport.update({
+  id: '/$config',
+  path: '/$config',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const ConfigIndexRoute = ConfigIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => ConfigRoute,
 } as any)
 const PlayPlayIdRoute = PlayPlayIdRouteImport.update({
   id: '/play/$playId',
   path: '/play/$playId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ConfigResultsRoute = ConfigResultsRouteImport.update({
+  id: '/results',
+  path: '/results',
+  getParentRoute: () => ConfigRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/$config': typeof ConfigRouteWithChildren
+  '/$config/results': typeof ConfigResultsRoute
   '/play/$playId': typeof PlayPlayIdRoute
+  '/$config/': typeof ConfigIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/$config/results': typeof ConfigResultsRoute
   '/play/$playId': typeof PlayPlayIdRoute
+  '/$config': typeof ConfigIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/$config': typeof ConfigRouteWithChildren
+  '/$config/results': typeof ConfigResultsRoute
   '/play/$playId': typeof PlayPlayIdRoute
+  '/$config/': typeof ConfigIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/play/$playId'
+  fullPaths:
+    '/' | '/$config' | '/$config/results' | '/play/$playId' | '/$config/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/play/$playId'
-  id: '__root__' | '/' | '/play/$playId'
+  to: '/' | '/$config/results' | '/play/$playId' | '/$config'
+  id:
+    | '__root__'
+    | '/'
+    | '/$config'
+    | '/$config/results'
+    | '/play/$playId'
+    | '/$config/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ConfigRoute: typeof ConfigRouteWithChildren
   PlayPlayIdRoute: typeof PlayPlayIdRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/$config': {
+      id: '/$config'
+      path: '/$config'
+      fullPath: '/$config'
+      preLoaderRoute: typeof ConfigRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/$config/': {
+      id: '/$config/'
+      path: '/'
+      fullPath: '/$config/'
+      preLoaderRoute: typeof ConfigIndexRouteImport
+      parentRoute: typeof ConfigRoute
     }
     '/play/$playId': {
       id: '/play/$playId'
@@ -65,11 +113,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PlayPlayIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/$config/results': {
+      id: '/$config/results'
+      path: '/results'
+      fullPath: '/$config/results'
+      preLoaderRoute: typeof ConfigResultsRouteImport
+      parentRoute: typeof ConfigRoute
+    }
   }
 }
 
+interface ConfigRouteChildren {
+  ConfigResultsRoute: typeof ConfigResultsRoute
+  ConfigIndexRoute: typeof ConfigIndexRoute
+}
+
+const ConfigRouteChildren: ConfigRouteChildren = {
+  ConfigResultsRoute: ConfigResultsRoute,
+  ConfigIndexRoute: ConfigIndexRoute,
+}
+
+const ConfigRouteWithChildren =
+  ConfigRoute._addFileChildren(ConfigRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ConfigRoute: ConfigRouteWithChildren,
   PlayPlayIdRoute: PlayPlayIdRoute,
 }
 export const routeTree = rootRouteImport

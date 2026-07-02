@@ -1,6 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
-import { Check, Play, Share2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { ArrowLeft, Check, Play, Share2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -20,6 +21,14 @@ interface SimulatorProps {
   initialConfig: GameConfig;
   /** a shared play (from /play/{id}) to preload into the lab on first mount. */
   initialPlay?: SimulateRequest;
+  /** "edit" (default) shows the config designer; "results" stages the preloaded
+      play, runs the batch on mount, and shows the outcome distribution. */
+  view?: "edit" | "results";
+  /** the content id of the saved config under /{config} — the Back button on the
+      results view routes here to re-edit. Absent on the fresh `/` editor. */
+  configId?: string;
+  /** results view: how many possessions to simulate (from the `?runs=N` search). */
+  runs?: number;
 }
 
 /** The two teams' full selectable rosters, in [home, away] order. */
@@ -33,7 +42,15 @@ const MAX_RUNS = 500;
 const clampRuns = (n: number): number =>
   Number.isFinite(n) ? Math.min(MAX_RUNS, Math.max(1, Math.floor(n))) : 1;
 
-export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
+export function Simulator({
+  initialConfig,
+  initialPlay,
+  view = "edit",
+  configId,
+  runs,
+}: SimulatorProps) {
+  const navigate = useNavigate();
+  const isResults = view === "results";
   const game = useGame(initialConfig);
   const { data: teams = [] } = useTeams();
   const { snapshot } = game;
@@ -81,22 +98,64 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
   };
   // share-link state: idle → the saved /play/{id} url once copied
   const [shareStatus, setShareStatus] = useState<"idle" | "saving" | "copied">("idle");
-  // how many possessions the header Run button simulates in one go
-  const [runCount, setRunCount] = useState(100);
+  // how many possessions submitting simulates in one go
+  const [runCount, setRunCount] = useState(runs ?? 100);
+  // persisting the play + routing to its results view
+  const [submitting, setSubmitting] = useState(false);
 
-  // Run the staged (or already-run) play runCount times. runLab captures the
-  // current formation; reRunLab re-runs the last authored play. Both play back
-  // the first run; every run's paths are pulled from R2 on demand.
   const canRun = game.labPhase === "staged" || game.labPhase === "ended";
-  const onRunBatch = () => {
-    if (game.labPhase === "staged") game.runLab(runCount);
-    else if (game.labPhase === "ended") game.reRunLab(runCount);
+
+  // Submit the config: persist the staged play to its content id and route to
+  // /{id}/results, which runs the batch. The results view owns the simulation,
+  // so submitting doesn't run it locally — it just saves and navigates.
+  const onSubmit = async () => {
+    const play = game.capturePlay();
+    if (!play) return;
+    setSubmitting(true);
+    try {
+      const { id } = await savePlay(play);
+      await navigate({
+        to: "/$config/results",
+        params: { config: id },
+        search: { runs: runCount },
+      });
+    } catch {
+      setSubmitting(false); // stay on the editor so it can be re-submitted
+    }
   };
 
-  // Once a batch's results are loaded, the plays list takes over the left panel
-  // (replacing the Teams / Play Lab tabs) and the court's play-by-play sits below
-  // the simulation. A single run keeps the normal editing layout.
-  const showPlays = game.simOutcomes.length > 1;
+  // Back from the results view to the editor for that same config (or the fresh
+  // editor if we arrived without a saved id).
+  const onBack = () => {
+    if (configId) void navigate({ to: "/$config", params: { config: configId } });
+    else void navigate({ to: "/" });
+  };
+
+  // ---- Results view: stage the preloaded play, then run the batch once. ----
+  // Driven directly here (not via the PossessionLab, which isn't rendered in
+  // results mode) so a deep-link / refresh reproduces the batch from the URL.
+  const { stageLab, runLab } = game;
+  const resultsStaged = useRef(false);
+  const resultsRan = useRef(false);
+  useEffect(() => {
+    if (!isResults || !initialPlay || game.version === 0 || resultsStaged.current) return;
+    resultsStaged.current = true;
+    stageLab({
+      offense: initialPlay.offense,
+      plan: initialPlay.plan,
+      defPlan: initialPlay.defPlan,
+      setup: initialPlay.setup ?? null,
+    });
+  }, [isResults, initialPlay, game.version, stageLab]);
+  useEffect(() => {
+    if (!isResults || game.labPhase !== "staged" || resultsRan.current) return;
+    resultsRan.current = true;
+    runLab(runs ?? runCount);
+  }, [isResults, game.labPhase, runLab, runs, runCount]);
+
+  // The results view replaces the Teams / Play Lab tabs with the outcome list;
+  // the court + play-by-play stay to play back a chosen run.
+  const showPlays = isResults;
 
   const onShare = async () => {
     const play = game.capturePlay();
@@ -116,37 +175,55 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
   return (
     <div className="mx-auto flex h-screen max-w-[1400px] flex-col gap-4 overflow-hidden p-4">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {isResults && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="-ml-2 gap-2"
+            onClick={onBack}
+            title="Edit this config and re-submit"
+          >
+            <ArrowLeft data-icon="inline-start" />
+            Back
+          </Button>
+        )}
         <h1 className="text-xl font-semibold">Fable Fieldhouse</h1>
-        <span className="text-sm text-muted-foreground">Play Lab</span>
+        <span className="text-sm text-muted-foreground">
+          {isResults ? "Results" : "Play Lab"}
+        </span>
         {names.length === 2 && (
           <span className="ml-auto text-sm text-muted-foreground">
             {names[0].name} vs {names[1].name}
           </span>
         )}
         <div className={`flex items-center gap-2 ${names.length === 2 ? "" : "ml-auto"}`}>
-          <label htmlFor="run-count" className="text-sm text-muted-foreground">
-            Runs
-          </label>
-          <Input
-            id="run-count"
-            type="number"
-            min={1}
-            max={MAX_RUNS}
-            value={runCount}
-            onChange={(e) => setRunCount(clampRuns(e.target.valueAsNumber))}
-            className="h-8 w-16"
-            title={`How many possessions to simulate (1–${MAX_RUNS})`}
-          />
-          <Button
-            size="sm"
-            className="gap-2"
-            onClick={onRunBatch}
-            disabled={!canRun || game.simulating}
-            title="Simulate the staged play this many times"
-          >
-            <Play data-icon="inline-start" />
-            {game.simulating ? "Running…" : runCount > 1 ? `Run ×${runCount}` : "Run"}
-          </Button>
+          {!isResults && (
+            <>
+              <label htmlFor="run-count" className="text-sm text-muted-foreground">
+                Runs
+              </label>
+              <Input
+                id="run-count"
+                type="number"
+                min={1}
+                max={MAX_RUNS}
+                value={runCount}
+                onChange={(e) => setRunCount(clampRuns(e.target.valueAsNumber))}
+                className="h-8 w-16"
+                title={`How many possessions to simulate (1–${MAX_RUNS})`}
+              />
+              <Button
+                size="sm"
+                className="gap-2"
+                onClick={onSubmit}
+                disabled={!canRun || submitting}
+                title="Save this config and simulate it"
+              >
+                <Play data-icon="inline-start" />
+                {submitting ? "Submitting…" : runCount > 1 ? `Run ×${runCount}` : "Run"}
+              </Button>
+            </>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -171,13 +248,19 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[420px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)]">
         {showPlays ? (
-          <BatchOutcomes
-            outcomes={game.simOutcomes}
-            activeSimId={game.activeSimId}
-            durationMs={game.simDurationMs}
-            onSelect={game.playRun}
-            className="min-h-0 flex-1"
-          />
+          game.simOutcomes.length > 0 ? (
+            <BatchOutcomes
+              outcomes={game.simOutcomes}
+              activeSimId={game.activeSimId}
+              durationMs={game.simDurationMs}
+              onSelect={game.playRun}
+              className="min-h-0 flex-1"
+            />
+          ) : (
+            <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+              {game.simulating ? "Simulating…" : "Preparing simulation…"}
+            </div>
+          )
         ) : (
         <Tabs value={labTab} onValueChange={setLabTab} className="flex min-h-0 flex-col">
           <TabsList className="h-auto w-full justify-start gap-6 rounded-none border-b border-border bg-transparent p-0">
@@ -246,8 +329,6 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
             onExport={game.exportReplay}
             onSetSpeed={game.setSpeed}
             onRun={() => game.runLab()}
-            onReRun={() => game.reRunLab()}
-            onReset={game.resetLab}
           />
           <Feed
             events={game.labEvents}
