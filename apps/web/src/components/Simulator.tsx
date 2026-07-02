@@ -124,6 +124,36 @@ export function Simulator({
     }
   };
 
+  // The Run control (count + submit) lives in the court toolbar in edit mode;
+  // the results view runs the batch on mount, so it needs no control.
+  const runControl = isResults ? null : (
+    <>
+      <label htmlFor="run-count" className="text-sm text-muted-foreground">
+        Runs
+      </label>
+      <Input
+        id="run-count"
+        type="number"
+        min={1}
+        max={MAX_RUNS}
+        value={runCount}
+        onChange={(e) => setRunCount(clampRuns(e.target.valueAsNumber))}
+        className="h-8 w-16"
+        title={`How many possessions to simulate (1–${MAX_RUNS})`}
+      />
+      <Button
+        size="sm"
+        className="gap-2"
+        onClick={onSubmit}
+        disabled={!canRun || submitting}
+        title="Save this config and simulate it"
+      >
+        <Play data-icon="inline-start" />
+        {submitting ? "Submitting…" : runCount > 1 ? `Run ×${runCount}` : "Run"}
+      </Button>
+    </>
+  );
+
   // Back from the results view to the editor for that same config (or the fresh
   // editor if we arrived without a saved id).
   const onBack = () => {
@@ -197,33 +227,6 @@ export function Simulator({
           </span>
         )}
         <div className={`flex items-center gap-2 ${names.length === 2 ? "" : "ml-auto"}`}>
-          {!isResults && (
-            <>
-              <label htmlFor="run-count" className="text-sm text-muted-foreground">
-                Runs
-              </label>
-              <Input
-                id="run-count"
-                type="number"
-                min={1}
-                max={MAX_RUNS}
-                value={runCount}
-                onChange={(e) => setRunCount(clampRuns(e.target.valueAsNumber))}
-                className="h-8 w-16"
-                title={`How many possessions to simulate (1–${MAX_RUNS})`}
-              />
-              <Button
-                size="sm"
-                className="gap-2"
-                onClick={onSubmit}
-                disabled={!canRun || submitting}
-                title="Save this config and simulate it"
-              >
-                <Play data-icon="inline-start" />
-                {submitting ? "Submitting…" : runCount > 1 ? `Run ×${runCount}` : "Run"}
-              </Button>
-            </>
-          )}
           <Button
             variant="outline"
             size="sm"
@@ -322,13 +325,11 @@ export function Simulator({
             playing={game.playing}
             speed={game.speed}
             canReplay={game.hasReplay}
-            labPhase={game.labPhase}
-            simulating={game.simulating}
             onTogglePlay={game.togglePlay}
             onReplay={game.replay}
             onExport={game.exportReplay}
             onSetSpeed={game.setSpeed}
-            onRun={() => game.runLab()}
+            runControl={runControl}
           />
           <Feed
             events={game.labEvents}

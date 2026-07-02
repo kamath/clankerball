@@ -1,7 +1,6 @@
 "use client";
 import { Download, Pause, Play, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { LabPhase } from "@/hooks/useGame";
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4];
 
@@ -11,14 +10,12 @@ interface CourtProps {
   speed: number;
   /** a recording exists — enables Replay / Export */
   canReplay: boolean;
-  /** possession lab state, for the Run control */
-  labPhase: LabPhase;
-  simulating: boolean;
   onTogglePlay: () => void;
   onReplay: () => void;
   onExport: () => void;
   onSetSpeed: (s: number) => void;
-  onRun: () => void;
+  /** the Run control (count + submit), rendered at the end of the toolbar */
+  runControl?: React.ReactNode;
 }
 
 export function Court({
@@ -26,13 +23,11 @@ export function Court({
   playing,
   speed,
   canReplay,
-  labPhase,
-  simulating,
   onTogglePlay,
   onReplay,
   onExport,
   onSetSpeed,
-  onRun,
+  runControl,
 }: CourtProps) {
   return (
     <div className="flex flex-col gap-3">
@@ -72,12 +67,8 @@ export function Court({
             </div>
           </>
         )}
-        {labPhase === "staged" && (
-          <div className="ml-auto flex items-center gap-2">
-            <Button onClick={onRun} disabled={simulating}>
-              {simulating ? "Simulating…" : "Run play"}
-            </Button>
-          </div>
+        {runControl && (
+          <div className="ml-auto flex items-center gap-2">{runControl}</div>
         )}
       </div>
     </div>
