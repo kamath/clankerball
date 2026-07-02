@@ -103,6 +103,15 @@ function SlotSelect({
   );
 }
 
+/** Mirror of sanitizePlan's action filter, so a draft row can be mapped to
+    its index in the sanitized plan (what the court diagram is drawn from). */
+const actionSurvives = (a: PlanAction) =>
+  a.type === "pickAndRoll"
+    ? a.handlerSlot === null || a.handlerSlot !== a.screenerSlot
+    : a.type === "getOpen"
+      ? a.targetSlot !== null && a.targetSlot !== a.screenerSlot
+      : a.targetSlot !== null;
+
 interface PlanEditorProps {
   names: string[];
   /** the offense editor exposes the inbound controls; defense hides them */
@@ -111,11 +120,24 @@ interface PlanEditorProps {
   initialPlan: TeamPlan | null;
   /** locks every control (e.g. while a possession is running) */
   disabled?: boolean;
+  /** sanitized index of the action the court pointer is over (glows the row) */
+  hoveredAction?: number | null;
+  /** row hover → glow the matching arrows on the court (sanitized index) */
+  onHoverAction?: (i: number | null) => void;
   onApply: (plan: TeamPlan | null) => void;
   className?: string;
 }
 
-export function PlanEditor({ names, context, initialPlan, disabled, onApply, className }: PlanEditorProps) {
+export function PlanEditor({
+  names,
+  context,
+  initialPlan,
+  disabled,
+  hoveredAction,
+  onHoverAction,
+  onApply,
+  className,
+}: PlanEditorProps) {
   const [draft, setDraft] = useState<TeamPlan>(initialPlan ?? BLANK);
   // context gates which sections show: a defense plan has no initiator /
   // scoring options / actions / tempo, only scheme + emphasis. (Inbound settings
@@ -252,8 +274,21 @@ export function PlanEditor({ names, context, initialPlan, disabled, onApply, cla
             <p className="text-xs text-muted-foreground">No actions — players run their normal game.</p>
           )}
           <div className="flex flex-col gap-2">
-            {draft.actions.map((a, i) => (
-              <div key={i} className="flex flex-col gap-2 rounded-md border p-2">
+            {draft.actions.map((a, i) => {
+              // this row's index in the sanitized plan (the court diagram's
+              // numbering); null while the row is still incomplete
+              const sanIdx = actionSurvives(a)
+                ? draft.actions.slice(0, i).filter(actionSurvives).length
+                : null;
+              return (
+              <div
+                key={i}
+                className={`flex flex-col gap-2 rounded-md border p-2 transition-colors ${
+                  sanIdx !== null && sanIdx === hoveredAction ? "border-amber-400/80 bg-amber-400/5" : ""
+                }`}
+                onMouseEnter={() => onHoverAction?.(sanIdx)}
+                onMouseLeave={() => onHoverAction?.(null)}
+              >
                 <div className="flex items-center gap-2">
                   <Select value={a.type} onValueChange={(v) => setAction(i, { type: v as PlanActionType })}>
                     <SelectTrigger className="h-8 flex-1">
@@ -305,7 +340,8 @@ export function PlanEditor({ names, context, initialPlan, disabled, onApply, cla
                   )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </Field>
           </>

@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/select";
 import { PlanEditor } from "@/components/PlanEditor";
 import type { InboundLoc, SimulateRequest, TeamPlan } from "@repo/shared";
-import type { BoxTeam, LabPhase, PossessionOpts } from "@/hooks/useGame";
+import type { BoxTeam, CourtPlanEdit, LabPhase, PossessionOpts } from "@/hooks/useGame";
 
 const NONE = "none";
 const BLANK_PLAN: TeamPlan = {
@@ -41,6 +41,21 @@ interface PossessionLabProps {
   teams: BoxTeam[];
   labPhase: LabPhase;
   onStage: (opts: PossessionOpts) => void;
+  /** apply edited plans onto the staged formation in place (players stay
+      put). Returns false when nothing is staged, in which case the editor
+      falls back to a clean re-stage. */
+  onUpdatePlans?: (opts: {
+    offense: number;
+    plan: TeamPlan | null;
+    defPlan: TeamPlan | null;
+  }) => boolean;
+  /** register how court gestures (screen/post/iso, glyph delete) edit the
+      plan owned here; called with null-safe replacement on remount. */
+  registerCourtEdit?: (fn: ((edit: CourtPlanEdit) => void) | null) => void;
+  /** plan-action index the court pointer is over (glows the sidebar row) */
+  hoveredAction?: number | null;
+  /** sidebar row hover → glow the matching arrows on the court */
+  onHighlightAction?: (i: number | null) => void;
   /** fired the first time the user touches the config, so the caller can set
       the matchup's previous plays aside and reveal the court to re-simulate. */
   onEdit?: () => void;
@@ -55,6 +70,10 @@ export function PossessionLab({
   teams,
   labPhase,
   onStage,
+  onUpdatePlans,
+  registerCourtEdit,
+  hoveredAction,
+  onHighlightAction,
   onEdit,
   initialPlay,
 }: PossessionLabProps) {
@@ -82,18 +101,72 @@ export function PossessionLab({
   // (offense/plan change) restages clean. Consumed once, then dropped.
   const pendingSetup = useRef(initialPlay?.setup ?? null);
 
-  // any change to the offense, the staged plans, the start mode, or the inbound
-  // spot re-stages a clean formation. once the play is running the config locks.
+  // fold the inbound spot / inbounder onto the offense plan (they don't apply
+  // when starting live, so they're dropped in that case).
+  const foldInbound = (plan: TeamPlan | null): TeamPlan | null =>
+    !live && (inbound !== null || inbounderSlot !== null)
+      ? { ...(plan ?? BLANK_PLAN), inbound, inbounderSlot }
+      : plan;
+
+  // Formation-shaping config (offense side, start mode, inbound spot/thrower)
+  // re-stages a clean formation. Reads the latest plans through a ref so plan
+  // edits don't retrigger it.
+  const plansRef = useRef(plans);
+  plansRef.current = plans;
+  const foldRef = useRef(foldInbound);
+  foldRef.current = foldInbound;
   useEffect(() => {
-    // fold the inbound spot / inbounder onto the offense plan (they don't apply
-    // when starting live, so they're dropped in that case).
-    let plan = plans.plan;
-    if (!live && (inbound !== null || inbounderSlot !== null)) {
-      plan = { ...(plan ?? BLANK_PLAN), inbound, inbounderSlot };
-    }
-    onStage({ offense, plan, defPlan: plans.defPlan, live, setup: pendingSetup.current });
+    const { plan, defPlan } = plansRef.current;
+    onStage({
+      offense,
+      plan: foldRef.current(plan),
+      defPlan,
+      live,
+      setup: pendingSetup.current,
+    });
     pendingSetup.current = null;
-  }, [offense, plans, live, inbound, inbounderSlot, onStage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offense, live, inbound, inbounderSlot, onStage]);
+
+  // Court gestures (screen/post/iso drags, glyph deletes) edit the same plan
+  // the sidebar owns; bumping the seed remounts the editors so the Actions
+  // list mirrors what was just drawn.
+  useEffect(() => {
+    if (!registerCourtEdit) return;
+    registerCourtEdit((edit) => {
+      onEdit?.();
+      setPlans((p) => {
+        const base = p.plan ?? BLANK_PLAN;
+        let actions = base.actions;
+        if (edit.kind === "add") {
+          if (actions.length >= 3) return p;
+          actions = [...actions, edit.action];
+        } else {
+          actions = actions.filter((_, i) => i !== edit.index);
+        }
+        return { ...p, plan: { ...base, actions } };
+      });
+      setBuildSeed((s) => s + 1);
+    });
+    return () => registerCourtEdit(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registerCourtEdit]);
+
+  // Plan edits (actions, emphasis, scorers, …) apply onto the staged formation
+  // in place — nobody moves. Falls back to a re-stage when nothing is staged
+  // (e.g. editing again after a run).
+  const seededPlans = useRef(true);
+  useEffect(() => {
+    if (seededPlans.current) {
+      seededPlans.current = false;
+      return;
+    }
+    const plan = foldRef.current(plans.plan);
+    if (!onUpdatePlans?.({ offense, plan, defPlan: plans.defPlan })) {
+      onStage({ offense, plan, defPlan: plans.defPlan, live, setup: null });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plans]);
 
   if (teams.length < 2) return null;
   const configurable = labPhase !== "running";
@@ -236,6 +309,8 @@ export function PossessionLab({
             context="lab-offense"
             initialPlan={plans.plan}
             disabled={!configurable}
+            hoveredAction={hoveredAction}
+            onHoverAction={onHighlightAction}
             onApply={(plan) => {
               onEdit?.();
               setPlans((p) => ({ ...p, plan }));

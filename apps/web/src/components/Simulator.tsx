@@ -321,7 +321,15 @@ export function Simulator({
                 teams={game.boxTeams}
                 labPhase={game.labPhase}
                 onStage={game.stageLab}
-                initialPlay={game.version === 0 ? initialPlay : undefined}
+                onUpdatePlans={game.updateLabPlans}
+                registerCourtEdit={game.registerCourtEdit}
+                hoveredAction={game.hoveredAction}
+                onHighlightAction={game.setActionHighlight}
+                /* the initial newGame bumps version 0→1 and remounts this
+                   designer — keep the preloaded play through that remount so
+                   a saved config's formation, routes, and plans survive.
+                   Later bumps (roster swaps) reset to a clean designer. */
+                initialPlay={game.version <= 1 ? initialPlay : undefined}
               />
             </ScrollArea>
           </TabsContent>

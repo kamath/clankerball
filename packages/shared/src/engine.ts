@@ -1924,10 +1924,14 @@ export class Game {
   /* ---------- loose balls & rebounds ---------- */
   updateLoose(dt: number) {
     const lb = this.ball.loose!;
-    // ball physics: roll and slow with friction
-    const fr = Math.max(0, 1 - 1.4 * dt);
-    lb.vel.x *= fr;
-    lb.vel.y *= fr;
+    // two-regime ball physics: while it's hot (skipping and bouncing) the
+    // floor scrubs speed off fast; once it settles into a roll, hardwood
+    // barely slows it — an errant pass keeps rolling until someone gets it
+    const sp0 = Math.hypot(lb.vel.x, lb.vel.y);
+    const decel = sp0 > 9 ? sp0 * 1.4 : 2.2; // ft/s²: drag while hot, rolling resistance after
+    const k = sp0 > 0.001 ? Math.max(0, sp0 - decel * dt) / sp0 : 0;
+    lb.vel.x *= k;
+    lb.vel.y *= k;
     lb.pos.x += lb.vel.x * dt;
     lb.pos.y += lb.vel.y * dt;
     const sp = Math.hypot(lb.vel.x, lb.vel.y);

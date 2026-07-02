@@ -7,9 +7,9 @@
    ============================================================ */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { COURT, Game, fmtClock } from "@repo/shared";
-import { PAD, Renderer, SCALE, type DrawScene } from "@/lib/renderer";
+import { PAD, Renderer, SCALE, type DrawScene, type OverlayGlyph } from "@/lib/renderer";
 import { fetchSimReplay, fetchSimulation } from "@/lib/api";
-import type { TeamPlan } from "@repo/shared";
+import type { PlanAction, TeamPlan } from "@repo/shared";
 import type {
   GameConfig,
   LabSetup,
@@ -24,7 +24,12 @@ import type {
 } from "@repo/shared";
 
 export type LabPhase = "idle" | "config" | "staged" | "running" | "ended";
-export type LabTool = "move" | "path";
+export type LabTool = "move" | "path" | "screen" | "post" | "iso";
+
+/** A plan edit authored by a court gesture, applied to the sidebar's plan. */
+export type CourtPlanEdit =
+  | { kind: "add"; action: PlanAction }
+  | { kind: "remove"; index: number };
 
 /** The distilled result of one simulated possession — the play-by-play outcome
     line, the points the offense scored, and the run's simId (the handle used to
@@ -125,8 +130,14 @@ export function useGame(initialConfig: GameConfig) {
   const replayingRef = useRef(false);
   const replayTimeRef = useRef(0);
 
+  // court-authored plan edits are applied by whoever owns the plan state
+  // (PossessionLab registers its handler here)
+  const courtEditRef = useRef<((edit: CourtPlanEdit) => void) | null>(null);
+
   const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot);
   const [events, setEvents] = useState<SimEvent[]>([]);
+  // plan-action index whose glyphs the pointer is over (drives sidebar glow)
+  const [hoveredAction, setHoveredAction] = useState<number | null>(null);
   const [labEvents, setLabEvents] = useState<SimEvent[]>([]);
   const [labPhase, setLabPhaseState] = useState<LabPhase>("idle");
   const [labTool, setLabToolState] = useState<LabTool>("move");
@@ -222,6 +233,83 @@ export function useGame(initialConfig: GameConfig) {
     []
   );
 
+  /** Build the staged plan's action diagram (screens, rolls, cuts) from the
+      lab game. Glyphs reference live Player objects, so the arrows track
+      drags; recomputed whenever the plan changes or the lab restages. Also
+      reports which players an action owns (their routes draw dimmed, since
+      the engine gives the action precedence over an authored route). */
+  const computePlanOverlay = useCallback(
+    (lab: Game): { glyphs: OverlayGlyph[] | null; owned: Player[] } => {
+      const off = lab.possession;
+      const plan = lab.tactics[off]?.plan;
+      const owned: Player[] = [];
+      if (!plan?.actions.length) return { glyphs: null, owned };
+      const ps = lab.teams[off].players;
+      const hoop = lab.hoops[off];
+      const roles = lab.roles;
+      const glyphs: OverlayGlyph[] = [];
+      plan.actions.forEach((a, i) => {
+        if (a.type === "pickAndRoll") {
+          const handler = (a.handlerSlot != null ? ps[a.handlerSlot] : roles.handler) ?? null;
+          const screener = (a.screenerSlot != null ? ps[a.screenerSlot] : roles.screener) ?? null;
+          if (!handler || !screener || screener === handler) return;
+          owned.push(screener);
+          glyphs.push({ kind: "screen", from: screener, to: handler, action: i });
+          const finish = a.finish ?? "roll";
+          const to =
+            finish === "roll"
+              ? { x: hoop.x, y: hoop.y }
+              : lab.spotPos(off, {
+                  ax: 23,
+                  ay: screener.pos.y >= COURT.H / 2 ? 9 : -9,
+                  cat: "three",
+                });
+          glyphs.push({ kind: "cut", from: screener, to, action: i });
+          glyphs.push({
+            kind: "drive",
+            from: handler,
+            via: screener,
+            to: { x: hoop.x, y: hoop.y },
+            action: i,
+          });
+        } else if (a.type === "getOpen") {
+          const target = a.targetSlot != null ? (ps[a.targetSlot] ?? null) : null;
+          if (!target) return;
+          // mirror the engine's screener fallback: the named one, else the best body
+          let scr = a.screenerSlot != null ? (ps[a.screenerSlot] ?? null) : null;
+          if (!scr || scr === target) {
+            scr =
+              ps
+                .filter((q) => q !== target && q !== roles.handler)
+                .sort(
+                  (a2, b) => b.strength + b.heightIn * 2 - (a2.strength + a2.heightIn * 2)
+                )[0] ?? null;
+          }
+          const def = lab.nearestOppTo(off, target.pos).p;
+          if (scr) owned.push(scr);
+          if (scr && def) glyphs.push({ kind: "screen", from: scr, to: def, action: i });
+          if (def) glyphs.push({ kind: "free", from: target, away: def, action: i });
+        } else if (a.type === "postUp") {
+          const target = a.targetSlot != null ? (ps[a.targetSlot] ?? null) : null;
+          if (!target) return;
+          owned.push(target);
+          const side = target.pos.y >= COURT.H / 2 ? 1 : -1;
+          glyphs.push({
+            kind: "cut",
+            from: target,
+            to: lab.spotPos(off, { ax: 4.5, ay: side * 8.6, cat: "inside" }),
+            action: i,
+          });
+        } else if (a.type === "iso") {
+          const target = a.targetSlot != null ? (ps[a.targetSlot] ?? null) : null;
+          if (target) glyphs.push({ kind: "ring", on: target, action: i });
+        }
+      });
+      return { glyphs, owned };
+    },
+    []
+  );
+
   const newGame = useCallback(
     (config?: GameConfig) => {
       if (config) configRef.current = config;
@@ -238,6 +326,7 @@ export function useGame(initialConfig: GameConfig) {
       setLabPhaseState("idle");
       setLabEvents([]);
       rendererRef.current?.setTeams([cfg.teamA.color, cfg.teamB.color]);
+      rendererRef.current?.setPlanOverlay(null);
       // drop any recorded possession from the previous matchup
       framesRef.current = [];
       metaRef.current = null;
@@ -263,7 +352,8 @@ export function useGame(initialConfig: GameConfig) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Lab editing: drag players / draw motion paths on the staged court.
+  // Lab editing: drag players, draw routes, and author plan actions (screen /
+  // post / iso gestures, glyph select + delete) on the staged court.
   useEffect(() => {
     const cv = canvasRef.current;
     if (!cv) return;
@@ -271,6 +361,9 @@ export function useGame(initialConfig: GameConfig) {
     let dragP: Player | null = null;
     let pathP: Player | null = null;
     let pts: Vec[] = [];
+    let screenP: Player | null = null; // screen gesture: who sets it
+    let screenOver: Player | null = null; // last teammate the drag crossed
+    let lastHover: number | null = null;
 
     const toCourt = (e: PointerEvent): Vec => {
       const rect = cv.getBoundingClientRect();
@@ -282,10 +375,23 @@ export function useGame(initialConfig: GameConfig) {
       };
     };
 
+    const authorAction = (action: PlanAction) =>
+      courtEditRef.current?.({ kind: "add", action });
+
     const down = (e: PointerEvent) => {
       const lab = labGameRef.current;
       if (modeRef.current !== "lab" || !lab || labPhaseRef.current !== "staged") return;
       const c = toCourt(e);
+      const rend = rendererRef.current;
+      // the selected glyph's ✕ badge outranks everything under it
+      if (labToolRef.current === "move" && rend) {
+        const del = rend.hitDelete(c.x, c.y);
+        if (del != null) {
+          rend.setSelectedAction(null);
+          courtEditRef.current?.({ kind: "remove", index: del });
+          return;
+        }
+      }
       let best: Player | null = null,
         bd = 2.6;
       for (const p of lab.allPlayers()) {
@@ -295,15 +401,45 @@ export function useGame(initialConfig: GameConfig) {
           best = p;
         }
       }
+      // a glyph handle wins when it's closer to the click than any player,
+      // so short arrows that hug their player stay selectable
+      if (labToolRef.current === "move" && rend) {
+        const hit = rend.hitAction(c.x, c.y);
+        const handleD = hit != null ? rend.handleDist(c.x, c.y) : Infinity;
+        if (hit != null && (!best || handleD < bd)) {
+          rend.setSelectedAction(hit);
+          return;
+        }
+        if (!best) {
+          rend.setSelectedAction(null);
+          return;
+        }
+      }
       if (!best) return;
       e.preventDefault();
       cv.setPointerCapture(e.pointerId);
-      if (labToolRef.current === "path") {
+      rend?.setSelectedAction(null);
+      const tool = labToolRef.current;
+      if (tool === "path") {
         if (best.team !== lab.possession) return; // routes are for the offense
         pathP = best;
         pts = [{ x: best.pos.x, y: best.pos.y }];
         best.path = pts;
         best.pathIdx = 0;
+      } else if (tool === "screen") {
+        if (best.team !== lab.possession) return; // actions are offense-only
+        screenP = best;
+        screenOver = null;
+        rend?.setPending({ from: best, to: { ...c }, over: null });
+      } else if (tool === "post" || tool === "iso") {
+        if (best.team !== lab.possession) return;
+        authorAction({
+          type: tool === "post" ? "postUp" : "iso",
+          targetSlot: best.slot,
+          handlerSlot: null,
+          screenerSlot: null,
+          finish: null,
+        });
       } else {
         // the inbounder is throwing it in from out of bounds — he stays put
         if (lab.inb && best === lab.inb.inbounder) return;
@@ -332,15 +468,90 @@ export function useGame(initialConfig: GameConfig) {
         if (Math.hypot(c.x - last.x, c.y - last.y) > 2) {
           pts.push({ x: clamp(c.x, 1, COURT.W - 1), y: clamp(c.y, 1, COURT.H - 1) });
         }
+      } else if (screenP) {
+        // screen gesture in flight: track the teammate under the pointer
+        const lab = labGameRef.current;
+        if (!lab) return;
+        const c = toCourt(e);
+        let over: Player | null = null,
+          od = 2.6;
+        for (const p of lab.teams[lab.possession].players) {
+          if (p === screenP) continue;
+          const d = Math.hypot(p.pos.x - c.x, p.pos.y - c.y);
+          if (d < od) {
+            od = d;
+            over = p;
+          }
+        }
+        if (over) screenOver = over;
+        rendererRef.current?.setPending({
+          from: screenP,
+          to: { ...c },
+          over: over ?? screenOver,
+        });
+      } else if (
+        e.buttons === 0 &&
+        labToolRef.current === "move" &&
+        modeRef.current === "lab" &&
+        labPhaseRef.current === "staged"
+      ) {
+        // plain hover: glow the action diagram under the pointer and tell
+        // the sidebar so its matching row lights up too
+        const rend = rendererRef.current;
+        if (!rend) return;
+        const c = toCourt(e);
+        const hit = rend.hitAction(c.x, c.y);
+        if (hit !== lastHover) {
+          lastHover = hit;
+          rend.setHighlightAction(hit);
+          setHoveredAction(hit);
+        }
       }
     };
 
-    const up = () => {
+    const up = (e: PointerEvent) => {
       const lab = labGameRef.current;
       if (dragP && lab) lab.setHoldSpot(dragP);
       if (pathP && pts.length < 2) pathP.path = null; // a tap, not a route
+      if (screenP && lab) {
+        rendererRef.current?.setPending(null);
+        const B = screenOver;
+        if (B && B !== screenP) {
+          // dropped on the initiator → pick & roll (where the drag ended past
+          // him sets the finish: toward the rim = roll, out to the arc = pop);
+          // dropped on anyone else → screen to get him open
+          const handlerP = lab.roles.handler ?? lab.ball.holder;
+          if (B === handlerP) {
+            const c = toCourt(e);
+            const hoop = lab.hoops[lab.possession];
+            let finish: "roll" | "pop" | null = null;
+            if (Math.hypot(B.pos.x - c.x, B.pos.y - c.y) > 3) {
+              const dC = Math.hypot(hoop.x - c.x, hoop.y - c.y);
+              const dB = Math.hypot(hoop.x - B.pos.x, hoop.y - B.pos.y);
+              finish = dC < dB - 2 ? "roll" : dC > 19 ? "pop" : null;
+            }
+            authorAction({
+              type: "pickAndRoll",
+              handlerSlot: B.slot,
+              screenerSlot: screenP.slot,
+              targetSlot: null,
+              finish,
+            });
+          } else {
+            authorAction({
+              type: "getOpen",
+              targetSlot: B.slot,
+              screenerSlot: screenP.slot,
+              handlerSlot: null,
+              finish: null,
+            });
+          }
+        }
+      }
       dragP = null;
       pathP = null;
+      screenP = null;
+      screenOver = null;
       pts = [];
     };
 
@@ -475,9 +686,9 @@ export function useGame(initialConfig: GameConfig) {
 
   /** Stage a possession in a fresh sandboxed game (real game untouched):
       players snap into formation and the court is immediately editable — drag
-      players and draw routes right away. Changing a config control (offense,
-      start, inbounder, scorers) re-stages a clean formation, which resets the
-      spots and clears the routes; the defense re-shapes in place. */
+      players and draw routes right away. Only formation-shaping controls
+      (offense side, start mode, inbound spot/thrower) come through here; plan
+      edits go through updateLabPlans and leave the formation alone. */
   const stageLab = useCallback(
     (opts: PossessionOpts) => {
       replayingRef.current = false; // entering the lab leaves any replay
@@ -513,6 +724,11 @@ export function useGame(initialConfig: GameConfig) {
       labGameRef.current = lab;
       // surface the engine's resolved roles so the UI can show them
       setLabRoles(lab.teams[opts.offense].players.map((p) => p.annotation));
+      // draw the plan's action diagram over the staged formation
+      const ov = computePlanOverlay(lab);
+      rendererRef.current?.setPlanOverlay(ov.glyphs, ov.owned);
+      setHoveredAction(null);
+      if (import.meta.env.DEV) (window as unknown as { __lab?: Game }).__lab = lab;
       setLabEvents([]);
       // a fresh formation drops any prior batch distribution
       setSimOutcomes([]);
@@ -524,8 +740,61 @@ export function useGame(initialConfig: GameConfig) {
       setPlaying(true);
       setSnapshot(sampleSnapshot(lab));
     },
-    [sampleSnapshot, setLabPhase]
+    [sampleSnapshot, setLabPhase, computePlanOverlay]
   );
+
+  /** Apply edited plans onto the already-staged possession WITHOUT rebuilding
+      the formation: positions, drags, and routes all stay put — only roles,
+      tendencies, annotations, and the action diagram update. The defense
+      re-shapes only when its scheme actually changed. Returns false when
+      nothing is staged (the caller should re-stage instead). */
+  const updateLabPlans = useCallback(
+    (opts: { offense: number; plan: TeamPlan | null; defPlan: TeamPlan | null }): boolean => {
+      const lab = labGameRef.current;
+      if (!lab || modeRef.current !== "lab" || labPhaseRef.current !== "staged") return false;
+      if (lab.possession !== opts.offense) return false;
+      const def = 1 - opts.offense;
+      const prevScheme = lab.tactics[def].defScheme;
+      // setPlan → setRoles clears dragged hold-spots; those are authored
+      // court state, not plan state — keep them
+      const held = new Map(lab.assignTargets);
+      lab.setPlan(opts.offense, opts.plan);
+      lab.setPlan(def, opts.defPlan);
+      lab.assignTargets = held;
+      const scheme = opts.defPlan?.defScheme ?? "man";
+      lab.tactics[def].defScheme = scheme;
+      if (scheme !== prevScheme) lab.labSetDefense(scheme);
+      // a new initiator takes over the ball: he receives the inbound, or
+      // holds it where he stands on a live start
+      const handler = lab.roles.handler;
+      if (handler) {
+        if (lab.inb && handler !== lab.inb.inbounder) {
+          lab.inb.receiver = handler;
+        } else if (!lab.inb && lab.ball.holder && lab.ball.holder !== handler) {
+          lab.ball.holder = handler;
+          lab.ballFollow();
+        }
+      }
+      setLabRoles(lab.teams[opts.offense].players.map((p) => p.annotation));
+      const ov = computePlanOverlay(lab);
+      rendererRef.current?.setPlanOverlay(ov.glyphs, ov.owned);
+      setHoveredAction(null);
+      setSnapshot(sampleSnapshot(lab));
+      return true;
+    },
+    [computePlanOverlay, sampleSnapshot]
+  );
+
+  /** PossessionLab (the plan owner) registers how court-authored plan edits
+      (screen/post/iso gestures, glyph deletes) get applied. */
+  const registerCourtEdit = useCallback((fn: ((edit: CourtPlanEdit) => void) | null) => {
+    courtEditRef.current = fn;
+  }, []);
+
+  /** Sidebar hover → glow the matching arrows on the court. */
+  const setActionHighlight = useCallback((i: number | null) => {
+    rendererRef.current?.setHighlightAction(i);
+  }, []);
 
   /** Set the starting shot clock (1–24) for the staged possession. Updates the
       frozen lab in place so the court reflects it immediately; the value is
@@ -551,6 +820,8 @@ export function useGame(initialConfig: GameConfig) {
       straight from the recorded frames. */
   const loadReplay = useCallback(
     (rep: Replay) => {
+      // playback draws recorded frames; the staged diagram doesn't apply
+      rendererRef.current?.setPlanOverlay(null);
       metaRef.current = rep.meta;
       framesRef.current = rep.frames;
       replayEventsRef.current = rep.events;
@@ -743,6 +1014,10 @@ export function useGame(initialConfig: GameConfig) {
     editPlayer,
     swapPlayer,
     stageLab,
+    updateLabPlans,
+    registerCourtEdit,
+    setActionHighlight,
+    hoveredAction,
     runLab,
     capturePlay,
     playRun,
