@@ -50,12 +50,13 @@ export async function fetchMatchup(input: BuildMatchupInput) {
   return res.json(); // inferred: GameConfig
 }
 
-/** Run a staged lab possession on the backend Worker; returns the recorded
-    Replay ({ meta, frames }) for the client to play back. */
-export async function fetchSimulation(input: SimulateRequest) {
-  const res = await api.api.simulate.$post({ json: input });
+/** Run a staged lab possession on the backend Worker `count` times (each run is
+    an independent random outcome); returns the list of recorded Replays
+    ({ meta, frames }) for the client to play back. */
+export async function fetchSimulation(input: SimulateRequest, count = 1) {
+  const res = await api.api.simulate.$post({ json: { ...input, count } });
   if (!res.ok) throw await toError(res);
-  return res.json(); // inferred: Replay
+  return res.json(); // inferred: Replay[]
 }
 
 /** Persist a staged play to KV; returns its content-addressed id for building

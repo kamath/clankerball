@@ -1,14 +1,16 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Share2 } from "lucide-react";
+import { Check, Play, Share2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useGame } from "@/hooks/useGame";
 import { useBuildMatchup, useConfigPlays, useTeams } from "@/lib/queries";
 import { fetchLibraryPlay, savePlay } from "@/lib/api";
 import type { GameConfig, PlayerConfig, SimulateRequest } from "@repo/shared";
+import { BatchOutcomes } from "./BatchOutcomes";
 import { Court } from "./Court";
 import { Feed } from "./Feed";
 import { PlayLibrary } from "./PlayLibrary";
@@ -27,6 +29,11 @@ const rostersOf = (cfg: GameConfig): [PlayerConfig[], PlayerConfig[]] => [
   cfg.teamA.roster ?? [],
   cfg.teamB.roster ?? [],
 ];
+
+/** Upper bound on simulations per Run, matching the API's MAX_BATCH. */
+const MAX_RUNS = 500;
+const clampRuns = (n: number): number =>
+  Number.isFinite(n) ? Math.min(MAX_RUNS, Math.max(1, Math.floor(n))) : 1;
 
 export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
   const game = useGame(initialConfig);
@@ -76,6 +83,8 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
   };
   // share-link state: idle → the saved /play/{id} url once copied
   const [shareStatus, setShareStatus] = useState<"idle" | "saving" | "copied">("idle");
+  // how many possessions the header Run button simulates in one go
+  const [runCount, setRunCount] = useState(1);
   const queryClient = useQueryClient();
 
   // The matchup's play library: prior possessions recorded on this exact config.
@@ -116,6 +125,15 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
     }
   };
 
+  // Run the staged (or already-run) play runCount times. runLab captures the
+  // current formation; reRunLab re-runs the last authored play. Both record every
+  // run to the library and play back the first.
+  const canRun = game.labPhase === "staged" || game.labPhase === "ended";
+  const onRunBatch = () => {
+    if (game.labPhase === "staged") game.runLab(runCount);
+    else if (game.labPhase === "ended") game.reRunLab(runCount);
+  };
+
   const onShare = async () => {
     const play = game.capturePlay();
     if (!play) return;
@@ -141,25 +159,50 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
             {names[0].name} vs {names[1].name}
           </span>
         )}
-        <Button
-          variant="outline"
-          size="sm"
-          className={`gap-2 ${names.length === 2 ? "" : "ml-auto"}`}
-          onClick={onShare}
-          disabled={shareStatus === "saving"}
-          title="Save this play and copy a shareable link"
-        >
-          {shareStatus === "copied" ? (
-            <Check data-icon="inline-start" />
-          ) : (
-            <Share2 data-icon="inline-start" />
-          )}
-          {shareStatus === "copied"
-            ? "Link copied"
-            : shareStatus === "saving"
-              ? "Saving…"
-              : "Share play"}
-        </Button>
+        <div className={`flex items-center gap-2 ${names.length === 2 ? "" : "ml-auto"}`}>
+          <label htmlFor="run-count" className="text-sm text-muted-foreground">
+            Runs
+          </label>
+          <Input
+            id="run-count"
+            type="number"
+            min={1}
+            max={MAX_RUNS}
+            value={runCount}
+            onChange={(e) => setRunCount(clampRuns(e.target.valueAsNumber))}
+            className="h-8 w-16"
+            title={`How many possessions to simulate (1–${MAX_RUNS})`}
+          />
+          <Button
+            size="sm"
+            className="gap-2"
+            onClick={onRunBatch}
+            disabled={!canRun || game.simulating}
+            title="Simulate the staged play this many times"
+          >
+            <Play data-icon="inline-start" />
+            {game.simulating ? "Running…" : runCount > 1 ? `Run ×${runCount}` : "Run"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-2"
+            onClick={onShare}
+            disabled={shareStatus === "saving"}
+            title="Save this play and copy a shareable link"
+          >
+            {shareStatus === "copied" ? (
+              <Check data-icon="inline-start" />
+            ) : (
+              <Share2 data-icon="inline-start" />
+            )}
+            {shareStatus === "copied"
+              ? "Link copied"
+              : shareStatus === "saving"
+                ? "Saving…"
+                : "Share play"}
+          </Button>
+        </div>
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[420px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)]">
@@ -241,16 +284,20 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
             onReplay={game.replay}
             onExport={game.exportReplay}
             onSetSpeed={game.setSpeed}
-            onRun={game.runLab}
-            onReRun={game.reRunLab}
+            onRun={() => game.runLab()}
+            onReRun={() => game.reRunLab()}
             onReset={game.resetLab}
           />
-          <Feed
-            events={game.labEvents}
-            snapshot={snapshot}
-            title="Possession play-by-play"
-            className="h-[220px]"
-          />
+          {game.simOutcomes.length > 1 ? (
+            <BatchOutcomes outcomes={game.simOutcomes} className="h-[220px]" />
+          ) : (
+            <Feed
+              events={game.labEvents}
+              snapshot={snapshot}
+              title="Possession play-by-play"
+              className="h-[220px]"
+            />
+          )}
           {showLibrary && (
             <PlayLibrary plays={plays} loadingId={loadingPlay} onSelect={onSelectPlay} />
           )}

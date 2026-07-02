@@ -6,7 +6,7 @@
    so 60fps rendering never depends on React re-renders.
    ============================================================ */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { COURT, Game, fmtClock } from "@repo/shared";
+import { COURT, Game, fmtClock, summarizePossession } from "@repo/shared";
 import { PAD, Renderer, SCALE, type DrawScene } from "@/lib/renderer";
 import { fetchSimulation } from "@/lib/api";
 import type { TeamPlan } from "@repo/shared";
@@ -25,6 +25,13 @@ import type {
 
 export type LabPhase = "idle" | "config" | "staged" | "running" | "ended";
 export type LabTool = "move" | "path";
+
+/** The distilled result of one simulated possession — the play-by-play outcome
+    line and the points the offense scored. One per run of a Run ×N batch. */
+export interface SimOutcome {
+  result: string;
+  points: number;
+}
 
 const replayQLabel = (quarter: number, over: boolean) => {
   if (over) return "FINAL";
@@ -124,6 +131,8 @@ export function useGame(initialConfig: GameConfig) {
   const [replaying, setReplaying] = useState(false);
   const [hasReplay, setHasReplay] = useState(false); // a recording is available
   const [simulating, setSimulating] = useState(false); // backend sim in flight
+  // one outcome per run of the last batch; length > 1 means a Run ×N was fired
+  const [simOutcomes, setSimOutcomes] = useState<SimOutcome[]>([]);
 
   const sampleSnapshot = useCallback((game: Game): Snapshot => {
     const sc = Math.max(0, Math.ceil(game.shotClock));
@@ -477,6 +486,7 @@ export function useGame(initialConfig: GameConfig) {
       // surface the engine's resolved roles so the UI can show them
       setLabRoles(lab.teams[opts.offense].players.map((p) => p.annotation));
       setLabEvents([]);
+      setSimOutcomes([]); // a fresh formation drops any prior batch distribution
       modeRef.current = "lab";
       setLabPhase("staged");
       playingRef.current = true;
@@ -513,11 +523,16 @@ export function useGame(initialConfig: GameConfig) {
   /** Ship a staged possession to the backend Worker, which runs the actual
       simulation and returns the recorded replay; then play it back. */
   const runSimulation = useCallback(
-    async (payload: SimulateRequest) => {
+    async (payload: SimulateRequest, count = 1) => {
       setSimulating(true);
+      setSimOutcomes([]);
       try {
-        const rep = await fetchSimulation(payload);
-        loadReplay(rep);
+        const reps = await fetchSimulation(payload, count);
+        // Record every run's outcome so a Run ×N shows the full distribution,
+        // then play back the first replay on the court.
+        setSimOutcomes(reps.map((rep) => summarizePossession(payload.offense, rep)));
+        const rep = reps[0];
+        if (rep) loadReplay(rep);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "simulation failed";
         setLabEvents((prev) => [
@@ -533,8 +548,9 @@ export function useGame(initialConfig: GameConfig) {
     [loadReplay, setLabPhase]
   );
 
-  /** Capture the staged play and simulate it on the backend. */
-  const runLab = useCallback(() => {
+  /** Capture the staged play and simulate it on the backend `count` times (the
+      response plays back the first run; every run is recorded to the library). */
+  const runLab = useCallback((count = 1) => {
     const lab = labGameRef.current;
     if (!lab || labPhaseRef.current !== "staged" || simulating) return;
     const setup = lab.labCaptureSetup();
@@ -542,30 +558,37 @@ export function useGame(initialConfig: GameConfig) {
     const offense = setup.labTeam;
     setLabRoles(lab.teams[offense].players.map((p) => p.annotation));
     setLabEvents([]);
-    void runSimulation({
-      config: configRef.current,
-      offense,
-      plan: lab.tactics[offense].plan ?? null,
-      defPlan: lab.tactics[1 - offense].plan ?? null,
-      setup,
-    });
+    void runSimulation(
+      {
+        config: configRef.current,
+        offense,
+        plan: lab.tactics[offense].plan ?? null,
+        defPlan: lab.tactics[1 - offense].plan ?? null,
+        setup,
+      },
+      count
+    );
   }, [runSimulation, simulating]);
 
-  /** Re-simulate the exact same authored play (fresh random outcome). */
-  const reRunLab = useCallback(() => {
+  /** Re-simulate the exact same authored play `count` times (fresh random
+      outcomes; the first is played back, all are recorded). */
+  const reRunLab = useCallback((count = 1) => {
     const lab = labGameRef.current;
     const setup = labSetupRef.current;
     if (!lab || !setup || labPhaseRef.current !== "ended" || simulating) return;
     const offense = setup.labTeam;
     setLabRoles(lab.teams[offense].players.map((p) => p.annotation));
     setLabEvents([]);
-    void runSimulation({
-      config: configRef.current,
-      offense,
-      plan: lab.tactics[offense].plan ?? null,
-      defPlan: lab.tactics[1 - offense].plan ?? null,
-      setup,
-    });
+    void runSimulation(
+      {
+        config: configRef.current,
+        offense,
+        plan: lab.tactics[offense].plan ?? null,
+        defPlan: lab.tactics[1 - offense].plan ?? null,
+        setup,
+      },
+      count
+    );
   }, [runSimulation, simulating]);
 
   /** Re-stage a clean formation with the plans already applied — drops any
@@ -682,6 +705,7 @@ export function useGame(initialConfig: GameConfig) {
     replaying,
     hasReplay,
     simulating,
+    simOutcomes,
     replay,
     exportReplay,
     newGame,
