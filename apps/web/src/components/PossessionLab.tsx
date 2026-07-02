@@ -10,7 +10,7 @@
    freezes when it ends; nothing outside the sandbox is touched.
    ============================================================ */
 import { useEffect, useRef, useState } from "react";
-import { Eraser, MousePointer2, PenLine } from "lucide-react";
+import { Eraser, MousePointer2, PenLine, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -22,7 +22,6 @@ interface PossessionLabProps {
   teams: BoxTeam[];
   labPhase: LabPhase;
   labTool: LabTool;
-  labRoles: (string | null)[];
   onStage: (opts: PossessionOpts) => void;
   onToolChange: (t: LabTool) => void;
   onClearPaths: () => void;
@@ -37,7 +36,6 @@ export function PossessionLab({
   teams,
   labPhase,
   labTool,
-  labRoles,
   onStage,
   onToolChange,
   onClearPaths,
@@ -51,6 +49,8 @@ export function PossessionLab({
   });
   // bumped whenever the offense flips so the editors re-seed from staged plans
   const [buildSeed, setBuildSeed] = useState(0);
+  // which side's plan editor is showing — controlled so Clear knows which to wipe
+  const [planTab, setPlanTab] = useState("offense");
   // a preloaded formation is applied to the FIRST stage only; any later edit
   // (offense/plan change) restages clean. Consumed once, then dropped.
   const pendingSetup = useRef(initialPlay?.setup ?? null);
@@ -68,7 +68,13 @@ export function PossessionLab({
   const defTeam = teams[1 - offense];
   const offNames = offTeam.players.map((bp) => lastName(bp.name));
   const defNames = defTeam.players.map((bp) => lastName(bp.name));
-  const handlerSlot = labRoles.findIndex((r) => r === "HANDLER");
+
+  // Wipe the plan for the side currently being edited, then re-seed the editors
+  // (bumping the key remounts them onto the fresh, now-blank plan).
+  const clearPlan = () => {
+    setPlans((p) => (planTab === "defense" ? { ...p, defPlan: null } : { ...p, plan: null }));
+    setBuildSeed((s) => s + 1);
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -89,7 +95,7 @@ export function PossessionLab({
               }}
             >
               <span className="mr-1.5 size-2.5 rounded-full" style={{ background: t.color }} />
-              {t.name.split(" ")[0]}
+              {lastName(t.name)}
             </Button>
           ))}
         </div>
@@ -97,7 +103,7 @@ export function PossessionLab({
 
       {/* forceMount keeps both editors alive so switching sides never drops an
           in-progress plan or re-stages the formation. */}
-      <Tabs defaultValue="offense" className="flex flex-col gap-2">
+      <Tabs value={planTab} onValueChange={setPlanTab} className="flex flex-col gap-2">
         <TabsList className="grid grid-cols-2">
           <TabsTrigger value="offense">Offense</TabsTrigger>
           <TabsTrigger value="defense">Defense</TabsTrigger>
@@ -125,15 +131,6 @@ export function PossessionLab({
           />
         </TabsContent>
       </Tabs>
-
-      {handlerSlot >= 0 && offTeam.players[handlerSlot] && (
-        <p className="text-xs text-muted-foreground">
-          Bringing it up:{" "}
-          <span className="font-medium">
-            #{offTeam.players[handlerSlot].number} {lastName(offTeam.players[handlerSlot].name)}
-          </span>
-        </p>
-      )}
 
       <div className="flex flex-col gap-1.5">
         <Label>Court tools</Label>
@@ -169,6 +166,13 @@ export function PossessionLab({
                 ? "Possession over — re-run it, or tweak the plan to restage."
                 : "Build both teams' plans, then run the play."}
         </p>
+      </div>
+
+      {/* Clears the plan for whichever side is open in the editor above. */}
+      <div className="flex justify-end">
+        <Button variant="outline" size="sm" disabled={!configurable} onClick={clearPlan}>
+          <X className="mr-1.5 size-3.5" /> Clear
+        </Button>
       </div>
     </div>
   );

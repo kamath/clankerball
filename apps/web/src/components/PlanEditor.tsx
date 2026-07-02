@@ -8,7 +8,7 @@
    rows never reach the engine.
    ============================================================ */
 import { useEffect, useRef, useState } from "react";
-import { Plus, Trash2, X } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import {
   sanitizePlan,
   type PlanAction,
@@ -448,13 +448,6 @@ export function PlanEditor({ names, context, initialPlan, disabled, onApply, cla
             </Field>
           </div>
         )}
-
-        {/* The plan applies automatically as you edit; Clear resets it. */}
-        <div className="flex justify-end">
-          <Button variant="outline" onClick={() => setDraft(BLANK)}>
-            <X className="mr-1.5 size-3.5" /> Clear
-          </Button>
-        </div>
       </div>
     </fieldset>
   );
