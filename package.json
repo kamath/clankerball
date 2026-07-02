@@ -10,10 +10,6 @@
     "build": "turbo run build",
     "preview": "turbo run preview --filter=@repo/web",
     "deploy:backend": "turbo run deploy --filter=@repo/backend",
-    "tb:build": "pnpm --filter @repo/tinybird run tb:build",
-    "tb:dev": "pnpm --filter @repo/tinybird run tb:dev",
-    "tb:deploy": "pnpm --filter @repo/tinybird run tb:deploy",
-    "tb:deploy:check": "pnpm --filter @repo/tinybird run tb:deploy:check",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
