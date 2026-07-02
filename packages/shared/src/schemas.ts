@@ -152,6 +152,7 @@ export const LabSetupSchema = z.object({
   inbounderSlot: z.number(),
   labTeam: z.number(),
   gameClock: z.number(),
+  startShotClock: z.number().min(1).max(24).default(24),
 });
 
 export const SimulateRequestSchema = z.object({

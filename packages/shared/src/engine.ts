@@ -95,6 +95,8 @@ export interface LabSetup {
   inbounderSlot: number;
   labTeam: number;
   gameClock: number;
+  /** shot-clock seconds the possession starts with (1–24) */
+  startShotClock: number;
 }
 
 /* Half-court spots in "attack space": ax = feet from hoop toward
@@ -2232,6 +2234,7 @@ export class Game {
       inbounderSlot: this.inb ? this.inb.inbounder.slot : 0,
       labTeam: this.lab ? this.lab.team : this.possession,
       gameClock: this.gameClock,
+      startShotClock: Math.min(24, Math.max(1, Math.round(this.shotClock))),
     };
   }
 
@@ -2247,7 +2250,9 @@ export class Game {
     // pin the same inbounder so the exact play replays (auto-pick would
     // otherwise re-resolve against wherever everyone ended up)
     this.tactics[snap.labTeam].inbounderSlot = snap.inbounderSlot;
-    this.setupInbound(snap.labTeam, { ...snap.inbSpot }, { sc: 24 });
+    this.setupInbound(snap.labTeam, { ...snap.inbSpot }, {
+      sc: Math.min(24, Math.max(1, snap.startShotClock ?? 24)),
+    });
     for (const f of snap.players) {
       const p = this.teams[f.team].players[f.slot];
       p.pos = { ...f.pos };

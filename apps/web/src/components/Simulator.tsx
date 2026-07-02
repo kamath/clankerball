@@ -318,8 +318,13 @@ export function Simulator({
         </Tabs>
         )}
 
-        <div className="relative flex flex-col gap-4">
-          <ShotClock snapshot={snapshot} />
+        <div className="relative flex flex-col justify-center gap-4">
+          <ShotClock
+            snapshot={snapshot}
+            editable={!isResults}
+            value={game.labShotClock}
+            onChange={game.setLabShotClock}
+          />
           <Court
             canvasRef={game.canvasRef}
             playing={game.playing}
@@ -331,12 +336,14 @@ export function Simulator({
             onSetSpeed={game.setSpeed}
             runControl={runControl}
           />
-          <Feed
-            events={game.labEvents}
-            snapshot={snapshot}
-            title="Possession play-by-play"
-            className="h-[220px]"
-          />
+          {isResults && (
+            <Feed
+              events={game.labEvents}
+              snapshot={snapshot}
+              title="Possession play-by-play"
+              className="h-[220px]"
+            />
+          )}
         </div>
       </main>
     </div>

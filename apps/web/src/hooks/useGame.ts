@@ -103,6 +103,9 @@ export function useGame(initialConfig: GameConfig) {
   const labToolRef = useRef<LabTool>("move");
   // the exact staged play, captured when it's run so it can be re-run
   const labSetupRef = useRef<ReturnType<Game["labCaptureSetup"]> | null>(null);
+  // starting shot-clock (1–24) the staged possession runs with; ref so stageLab
+  // reads the latest without re-creating the callback
+  const shotClockRef = useRef(24);
   const rendererRef = useRef<Renderer | null>(null);
   const configRef = useRef<GameConfig>(initialConfig);
   const playingRef = useRef(true);
@@ -124,6 +127,8 @@ export function useGame(initialConfig: GameConfig) {
   const [labEvents, setLabEvents] = useState<SimEvent[]>([]);
   const [labPhase, setLabPhaseState] = useState<LabPhase>("idle");
   const [labTool, setLabToolState] = useState<LabTool>("move");
+  // editable starting shot clock shown above the court in the lab
+  const [labShotClock, setLabShotClockState] = useState(24);
   // resolved on-court role label per offensive roster slot (HANDLER, SPACE…)
   const [labRoles, setLabRoles] = useState<(string | null)[]>([]);
   const [boxTeams, setBoxTeams] = useState<BoxTeam[]>([]);
@@ -487,6 +492,12 @@ export function useGame(initialConfig: GameConfig) {
         lab.labReplaySetup(opts.setup);
         labSetupRef.current = opts.setup; // so an immediate re-run replays it exactly
       }
+      // Honor the chosen starting shot clock: a loaded play carries its own,
+      // otherwise keep whatever the user last set. Frozen, so it won't tick.
+      const startSc = opts.setup?.startShotClock ?? shotClockRef.current;
+      lab.shotClock = startSc;
+      shotClockRef.current = startSc;
+      setLabShotClockState(startSc);
       lab.frozen = true; // hold the formation for editing
       labGameRef.current = lab;
       // surface the engine's resolved roles so the UI can show them
@@ -503,6 +514,25 @@ export function useGame(initialConfig: GameConfig) {
       setSnapshot(sampleSnapshot(lab));
     },
     [sampleSnapshot, setLabPhase]
+  );
+
+  /** Set the starting shot clock (1–24) for the staged possession. Updates the
+      frozen lab in place so the court reflects it immediately; the value is
+      captured into the LabSetup when the play is run, so it persists with the
+      saved config. */
+  const setLabShotClock = useCallback(
+    (v: number) => {
+      if (!Number.isFinite(v)) return;
+      const sc = Math.min(24, Math.max(1, Math.round(v)));
+      shotClockRef.current = sc;
+      setLabShotClockState(sc);
+      const lab = labGameRef.current;
+      if (lab && labPhaseRef.current === "staged") {
+        lab.shotClock = sc;
+        setSnapshot(sampleSnapshot(lab));
+      }
+    },
+    [sampleSnapshot]
   );
 
   /** Load a possession the backend just simulated and start playing it back
@@ -682,6 +712,8 @@ export function useGame(initialConfig: GameConfig) {
     labPhase,
     labTool,
     labRoles,
+    labShotClock,
+    setLabShotClock,
     boxTeams,
     playing,
     speed,
