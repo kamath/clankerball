@@ -6,9 +6,9 @@
    so 60fps rendering never depends on React re-renders.
    ============================================================ */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { COURT, Game, fmtClock, summarizePossession } from "@repo/shared";
+import { COURT, Game, fmtClock } from "@repo/shared";
 import { PAD, Renderer, SCALE, type DrawScene } from "@/lib/renderer";
-import { fetchSimulation } from "@/lib/api";
+import { fetchSimReplay, fetchSimulation } from "@/lib/api";
 import type { TeamPlan } from "@repo/shared";
 import type {
   GameConfig,
@@ -27,8 +27,10 @@ export type LabPhase = "idle" | "config" | "staged" | "running" | "ended";
 export type LabTool = "move" | "path";
 
 /** The distilled result of one simulated possession — the play-by-play outcome
-    line and the points the offense scored. One per run of a Run ×N batch. */
+    line, the points the offense scored, and the run's simId (the handle used to
+    pull its Replay from R2 to play it back). One per run of a Run ×N batch. */
 export interface SimOutcome {
+  simId: string;
   result: string;
   points: number;
 }
@@ -133,6 +135,10 @@ export function useGame(initialConfig: GameConfig) {
   const [simulating, setSimulating] = useState(false); // backend sim in flight
   // one outcome per run of the last batch; length > 1 means a Run ×N was fired
   const [simOutcomes, setSimOutcomes] = useState<SimOutcome[]>([]);
+  // simId of the run currently loaded on the court, so the list can mark it
+  const [activeSimId, setActiveSimId] = useState<string | null>(null);
+  // wall-clock ms the last batch took to compute (round-trip to the backend)
+  const [simDurationMs, setSimDurationMs] = useState<number | null>(null);
 
   const sampleSnapshot = useCallback((game: Game): Snapshot => {
     const sc = Math.max(0, Math.ceil(game.shotClock));
@@ -486,7 +492,10 @@ export function useGame(initialConfig: GameConfig) {
       // surface the engine's resolved roles so the UI can show them
       setLabRoles(lab.teams[opts.offense].players.map((p) => p.annotation));
       setLabEvents([]);
-      setSimOutcomes([]); // a fresh formation drops any prior batch distribution
+      // a fresh formation drops any prior batch distribution
+      setSimOutcomes([]);
+      setActiveSimId(null);
+      setSimDurationMs(null);
       modeRef.current = "lab";
       setLabPhase("staged");
       playingRef.current = true;
@@ -526,13 +535,24 @@ export function useGame(initialConfig: GameConfig) {
     async (payload: SimulateRequest, count = 1) => {
       setSimulating(true);
       setSimOutcomes([]);
+      setActiveSimId(null);
+      setSimDurationMs(null);
       try {
-        const reps = await fetchSimulation(payload, count);
-        // Record every run's outcome so a Run ×N shows the full distribution,
-        // then play back the first replay on the court.
-        setSimOutcomes(reps.map((rep) => summarizePossession(payload.offense, rep)));
-        const rep = reps[0];
-        if (rep) loadReplay(rep);
+        // Each run returns its outcome + points + simId; frames (paths) stay in
+        // R2. Time the batch round-trip so the UI can show how long it took, then
+        // record every run and pull the first run's Replay back to play it.
+        const started = performance.now();
+        const runs = await fetchSimulation(payload, count);
+        setSimDurationMs(performance.now() - started);
+        setSimOutcomes(
+          runs.map((r) => ({ simId: r.simId, result: r.result, points: r.points }))
+        );
+        const first = runs[0];
+        if (first) {
+          setActiveSimId(first.simId);
+          const rep = await fetchSimReplay(first.simId);
+          loadReplay(rep);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "simulation failed";
         setLabEvents((prev) => [
@@ -546,6 +566,22 @@ export function useGame(initialConfig: GameConfig) {
       }
     },
     [loadReplay, setLabPhase]
+  );
+
+  /** Play back a specific run from the current batch on the court: pull its
+      Replay (paths + play-by-play) from R2 by simId and load it. The staged
+      formation is unchanged, so the run animates over the same lineup. */
+  const playRun = useCallback(
+    async (simId: string) => {
+      try {
+        const rep = await fetchSimReplay(simId);
+        setActiveSimId(simId);
+        loadReplay(rep);
+      } catch {
+        /* the run's paths couldn't be pulled; leave the current view as-is */
+      }
+    },
+    [loadReplay]
   );
 
   /** Capture the staged play and simulate it on the backend `count` times (the
@@ -623,22 +659,6 @@ export function useGame(initialConfig: GameConfig) {
     };
   }, []);
 
-  /** Play back a recorded play from the matchup library: re-stage its authored
-      formation (so it can be tweaked / re-run), then load the exact replay that
-      ran so the court shows the same outcome the library listed. Assumes the
-      play belongs to the current matchup (the library only lists this config). */
-  const playStored = useCallback(
-    (request: SimulateRequest, rep: Replay) => {
-      stageLab({
-        offense: request.offense,
-        plan: request.plan,
-        defPlan: request.defPlan,
-        setup: request.setup,
-      });
-      loadReplay(rep);
-    },
-    [stageLab, loadReplay]
-  );
 
   /** Erase all authored motion paths on the staged formation. */
   const clearLabPaths = useCallback(() => {
@@ -706,6 +726,8 @@ export function useGame(initialConfig: GameConfig) {
     hasReplay,
     simulating,
     simOutcomes,
+    activeSimId,
+    simDurationMs,
     replay,
     exportReplay,
     newGame,
@@ -718,7 +740,7 @@ export function useGame(initialConfig: GameConfig) {
     reRunLab,
     resetLab,
     capturePlay,
-    playStored,
+    playRun,
     clearLabPaths,
     setLabTool,
     getConfig: () => configRef.current,

@@ -10,46 +10,25 @@ import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { swaggerUI } from "@hono/swagger-ui";
 import { cors } from "hono/cors";
 import {
+  BatchRunSchema,
   BuildMatchupInputSchema,
   GameConfigSchema,
-  PlaySummarySchema,
   ReplaySchema,
   RosterPlayerSchema,
   SimulateRequestSchema,
-  StoredPlaySchema,
   TeamOptionSchema,
-  hashConfig,
   simulatePossession,
+  summarizePossession,
 } from "@repo/shared";
-import {
-  batchIngestSimulations,
-  getRunConfig,
-  ingestSimulation,
-  listPlaysForConfig,
-  type ExportTarget,
-} from "@repo/tinybird";
 import { buildMatchup, listAllPlayers, listTeams } from "./lib/teams";
 
 const ErrorSchema = z.object({ error: z.string() });
 const jsonError = { content: { "application/json": { schema: ErrorSchema } } };
 
-/* ---------- analytics export selection ----------
-   Which artifacts a simulation ships to the analytics backend. "config" and
-   "events" are Tinybird rows; "movements" and "replay" are per-sim R2 objects
-   (one subrequest each). "all" writes everything (the single-run default, which
-   keeps the play library fully populated). */
-const ExportTargetSchema = z.enum(["config", "events", "movements", "replay"]);
-const ExportSelectionSchema = z.union([z.literal("all"), z.array(ExportTargetSchema).min(1)]);
-const ALL_EXPORT_TARGETS: ExportTarget[] = ["config", "events", "movements", "replay"];
-/** Cap on simulations per batch request: bounds Worker CPU/memory and the total
-    subrequest count so one HTTP call can't blow the Worker's limits. */
+/** Cap on simulations per /simulate request. Each run writes its Replay to R2
+    (one subrequest), so this also bounds the per-invocation subrequest count
+    safely under the Worker's ~1000 cap, alongside CPU/memory. */
 const MAX_BATCH = 500;
-/** Keep total per-invocation subrequests (R2 puts + Tinybird appends) safely
-    under the Worker's ~1000 cap. */
-const SUBREQUEST_BUDGET = 800;
-/** How many recorded possessions the matchup play library fetches. Comfortably
-    covers several max-size batches; each row is a tiny outcome summary. */
-const LIBRARY_LIMIT = 2000;
 
 /* ---------- Worker bindings ----------
    KV bindings live on the Hono request context (c.env), NOT on process.env —
@@ -73,27 +52,14 @@ interface R2BucketLike {
 }
 type Bindings = { PLAYS: KVNamespaceLike; SIMULATION_ARTIFACTS: R2BucketLike };
 
-/* R2 putters for the two per-sim artifacts, used by the /simulate ingest path.
-   Ingest only invokes these when "movements"/"replay" are in the export
-   selection, so unselected artifacts cost nothing. */
-const artifactStore = (bucket: R2BucketLike) => ({
-  putMovements: async (artifact: { sim_id: string }) => {
-    const key = `simulations/${artifact.sim_id}/movements.json`;
-    await bucket.put(key, JSON.stringify(artifact), {
-      httpMetadata: { contentType: "application/json" },
-    });
-    return key;
-  },
-  // Persist the whole Replay so the library can reproduce a possession exactly
-  // (the R2 movement rows drop per-frame scoreboard/clock).
-  putReplay: async (replay: unknown, simId: string) => {
-    const key = `simulations/${simId}/replay.json`;
-    await bucket.put(key, JSON.stringify(replay), {
-      httpMetadata: { contentType: "application/json" },
-    });
-    return key;
-  },
-});
+/** Persist a run's whole Replay (its frames = the movement "paths", plus events)
+    to R2 under its simId, so GET /simulate/{id} can pull it back for playback.
+    Keyed by simId: the object is the exact recording the client plays. */
+const replayKey = (simId: string) => `simulations/${simId}/replay.json`;
+const putReplay = (bucket: R2BucketLike, simId: string, replay: unknown) =>
+  bucket.put(replayKey(simId), JSON.stringify(replay), {
+    httpMetadata: { contentType: "application/json" },
+  });
 
 /* ---------- content-addressed play ids ----------
    A play's id is a hash of its canonical JSON, so re-saving an identical play
@@ -163,33 +129,30 @@ const matchupRoute = createRoute({
   },
 });
 
-// The simulate body is a SimulateRequest plus two optional controls: how many
-// possessions to run (Monte-Carlo — the sim is random, so each run differs) and
-// which analytics artifacts to write. Omitting both preserves today's behavior:
-// one possession, ingested in full.
+// The simulate body is a SimulateRequest plus an optional count: how many
+// possessions to run (Monte-Carlo — the sim is random, so each run differs).
+// Omitting it runs a single possession.
 const SimulateBodySchema = SimulateRequestSchema.extend({
-  /** How many independent possessions to simulate. Defaults to 1. All runs are
-      ingested; the response returns every run's replay, in order. */
+  /** How many independent possessions to simulate. Defaults to 1. Each run's
+      full Replay is written to R2; the response returns one summary per run. */
   count: z.number().int().min(1).max(MAX_BATCH).optional(),
-  /** Which artifacts to write. Defaults to "all" for a single run and to
-      config+events for a multi-run batch (no per-sim R2 writes). */
-  export: ExportSelectionSchema.optional(),
 });
 
 const simulateRoute = createRoute({
   method: "post",
   path: "/simulate",
-  summary: "Run a staged lab possession N times and return every replay",
+  summary: "Run a staged lab possession N times and return every outcome",
   tags: ["simulate"],
   request: {
     body: { required: true, content: { "application/json": { schema: SimulateBodySchema } } },
   },
   responses: {
     200: {
-      description: "One frame-by-frame recording per simulated possession, in order",
-      content: { "application/json": { schema: z.array(ReplaySchema) } },
+      description:
+        "One outcome summary (result + points + play-by-play) per simulated possession, in order. Each run's frames (paths) are pullable from R2 via GET /simulate/{id}.",
+      content: { "application/json": { schema: z.array(BatchRunSchema) } },
     },
-    400: { description: "Batch too large for the requested export", ...jsonError },
+    400: { description: "Invalid request (e.g. count above the batch cap)", ...jsonError },
     500: { description: "Simulation error", ...jsonError },
   },
 });
@@ -232,47 +195,27 @@ const getPlayRoute = createRoute({
   },
 });
 
-/* ---------- play library (Tinybird-backed) ----------
-   Every simulation is ingested to Tinybird (run summary + play-by-play) with its
-   full Replay stored to R2. The library reads that history back: list the plays
-   run on a given matchup, then replay any one exactly. */
+/* ---------- pull a run's paths back ----------
+   Each /simulate run writes its full Replay (frames = movement paths, plus the
+   play-by-play) to R2 under its simId. This reads one back so the client can
+   play a chosen run on the court — no persisted history/analytics involved. */
 const SimIdParamSchema = z.object({
   id: z.string().openapi({ param: { name: "id", in: "path" }, example: "9f8e7d6c5b4a" }),
 });
 
-const librarySearchRoute = createRoute({
-  method: "post",
-  path: "/library/search",
-  summary: "List prior plays run on a matchup (exact config match), newest first",
-  tags: ["library"],
-  request: {
-    body: {
-      required: true,
-      content: { "application/json": { schema: z.object({ config: GameConfigSchema }) } },
-    },
-  },
-  responses: {
-    200: {
-      description: "Outcome summaries of every recorded play on this exact config",
-      content: { "application/json": { schema: z.array(PlaySummarySchema) } },
-    },
-    500: { description: "Analytics read error", ...jsonError },
-  },
-});
-
-const libraryReplayRoute = createRoute({
+const simReplayRoute = createRoute({
   method: "get",
-  path: "/library/{id}",
-  summary: "Load a recorded play by sim id — its authored request plus exact replay",
-  tags: ["library"],
+  path: "/simulate/{id}",
+  summary: "Pull a simulated run's Replay (its paths + play-by-play) from R2 by simId",
+  tags: ["simulate"],
   request: { params: SimIdParamSchema },
   responses: {
     200: {
-      description: "The recorded play: authored request + the replay that ran",
-      content: { "application/json": { schema: StoredPlaySchema } },
+      description: "The exact Replay that ran, ready to play back",
+      content: { "application/json": { schema: ReplaySchema } },
     },
-    404: { description: "No recorded play with that id", ...jsonError },
-    500: { description: "Analytics/artifact read error", ...jsonError },
+    404: { description: "No stored run with that id", ...jsonError },
+    500: { description: "Artifact read error", ...jsonError },
   },
 });
 
@@ -317,62 +260,36 @@ const routes = base
     return c.json(GameConfigSchema.parse(config), 200);
   })
   .openapi(simulateRoute, async (c) => {
-    const { count = 1, export: exportSel, ...req } = c.req.valid("json");
-    const host = process.env.TINYBIRD_HOST;
-    const token = process.env.TINYBIRD_TOKEN;
-    const willIngest = Boolean(host && token);
-
-    // A single run defaults to "all" (so the play library can replay it exactly);
-    // a multi-run batch defaults to tabular only (config + events) so it doesn't
-    // fan out one R2 write per simulation. An explicit selection overrides both.
-    const targets: ExportTarget[] =
-      exportSel === "all"
-        ? [...ALL_EXPORT_TARGETS]
-        : exportSel ?? (count > 1 ? ["config", "events"] : [...ALL_EXPORT_TARGETS]);
-    const r2PerSim =
-      (targets.includes("movements") ? 1 : 0) + (targets.includes("replay") ? 1 : 0);
-    // Per-sim R2 artifacts each cost a subrequest; reject a batch that would blow
-    // the Worker's cap rather than silently dropping writes.
-    if (willIngest && r2PerSim * count > SUBREQUEST_BUDGET) {
-      return c.json(
-        {
-          error: `Batch of ${count} with ${r2PerSim} R2 write(s)/sim exceeds the Worker subrequest budget (${SUBREQUEST_BUDGET}). Reduce count or export only "config"/"events".`,
-        },
-        400
-      );
-    }
+    const { count = 1, ...req } = c.req.valid("json");
+    const bucket = c.env.SIMULATION_ARTIFACTS;
+    const offenseTeam = req.offense === 0 ? req.config.teamA.name : req.config.teamB.name;
 
     // The engine is pure CPU and random per run, so each possession is an
-    // independent outcome. Every replay is returned to the caller, in order.
-    const replays = Array.from({ length: count }, () => simulatePossession(req));
+    // independent outcome. Mint a simId per run so its paths can be pulled back.
+    const runs = Array.from({ length: count }, () => ({
+      simId: crypto.randomUUID().replace(/-/g, ""),
+      replay: simulatePossession(req),
+    }));
 
-    // Best-effort analytics: record the runs (any subset of config/events/
-    // movements/replay) to Tinybird + R2. Fire-and-forget via waitUntil so it
-    // never blocks or fails the response; a multi-run batch collapses into a
-    // handful of appends via batchIngestSimulations. No-op when TINYBIRD_* aren't
-    // configured (e.g. local dev — the library is then simply empty).
-    if (willIngest) {
-      const store = artifactStore(c.env.SIMULATION_ARTIFACTS);
-      const ingest = (
-        count === 1
-          ? ingestSimulation({ host: host!, token: token! }, req, replays[0], {
-              export: targets,
-              ...store,
-            })
-          : batchIngestSimulations(
-              { host: host!, token: token! },
-              replays.map((replay) => ({ input: req, replay })),
-              { export: targets, ...store }
-            )
-      ).catch((err) => console.error("Tinybird ingest failed:", err));
-      try {
-        c.executionCtx.waitUntil(ingest);
-      } catch {
-        // No execution context outside a Worker — let it run detached.
-      }
-    }
+    // Write each run's full Replay (frames = the movement paths, plus the
+    // play-by-play) to R2 so GET /simulate/{id} can pull it back for playback.
+    // Awaited (best-effort per run) so the paths are available the instant the
+    // caller asks; a failed write just means that one run can't be replayed —
+    // its outcome + events are still returned below.
+    await Promise.all(
+      runs.map(({ simId, replay }) =>
+        putReplay(bucket, simId, replay).catch((err) =>
+          console.error(`Failed to store replay ${simId}:`, err)
+        )
+      )
+    );
 
-    return c.json(z.array(ReplaySchema).parse(replays), 200);
+    // Return one light summary per run: outcome + points + the full play-by-play.
+    const results = runs.map(({ simId, replay }) => {
+      const { result, points } = summarizePossession(req.offense, replay);
+      return { simId, result, points, offense: req.offense, offenseTeam, events: replay.events };
+    });
+    return c.json(z.array(BatchRunSchema).parse(results), 200);
   })
   .openapi(savePlayRoute, async (c) => {
     const play = c.req.valid("json");
@@ -382,46 +299,14 @@ const routes = base
     await c.env.PLAYS.put(`play:${id}`, JSON.stringify(play));
     return c.json({ id }, 200);
   })
-  .openapi(librarySearchRoute, async (c) => {
-    const { config } = c.req.valid("json");
-    const host = process.env.TINYBIRD_HOST;
-    const token = process.env.TINYBIRD_TOKEN;
-    // No analytics backend → an empty library (the graceful local-dev default).
-    if (!host || !token) return c.json([], 200);
-    const matchup = await hashConfig(config);
-    // Show the whole matchup library, not just the newest 50 — a single Run ×N
-    // can record hundreds of possessions at once.
-    const rows = await listPlaysForConfig({ host, token }, matchup, LIBRARY_LIMIT);
-    const plays = rows.map((r) => ({
-      simId: r.sim_id,
-      result: r.result,
-      points: r.points,
-      offense: r.offense,
-      offenseTeam: r.offense_team,
-      timestamp: r.timestamp,
-    }));
-    return c.json(z.array(PlaySummarySchema).parse(plays), 200);
-  })
-  .openapi(libraryReplayRoute, async (c) => {
+  .openapi(simReplayRoute, async (c) => {
     const { id } = c.req.valid("param");
-    const host = process.env.TINYBIRD_HOST;
-    const token = process.env.TINYBIRD_TOKEN;
-    if (!host || !token) return c.json({ error: "Play library not configured" }, 404);
-    // The run row carries the verbatim config/plan/setup; the exact Replay lives
-    // in R2. Recombine them into a StoredPlay the client can stage + play back.
-    const run = await getRunConfig({ host, token }, id);
-    if (!run) return c.json({ error: "Play not found" }, 404);
-    const artifact = await c.env.SIMULATION_ARTIFACTS.get(`simulations/${id}/replay.json`);
-    if (!artifact) return c.json({ error: "Replay artifact missing" }, 404);
+    // The run's exact Replay (paths + play-by-play) was written to R2 by
+    // /simulate; read it straight back. No analytics/history involved.
+    const artifact = await c.env.SIMULATION_ARTIFACTS.get(replayKey(id));
+    if (!artifact) return c.json({ error: "Run not found" }, 404);
     const replay = ReplaySchema.parse(JSON.parse(await artifact.text()));
-    const request = SimulateRequestSchema.parse({
-      config: JSON.parse(run.config),
-      offense: run.offense,
-      plan: JSON.parse(run.plan),
-      defPlan: JSON.parse(run.def_plan),
-      setup: JSON.parse(run.setup),
-    });
-    return c.json(StoredPlaySchema.parse({ request, replay }), 200);
+    return c.json(replay, 200);
   })
   .openapi(getPlayRoute, async (c) => {
     const { id } = c.req.valid("param");

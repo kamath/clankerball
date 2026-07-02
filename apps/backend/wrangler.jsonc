@@ -17,8 +17,9 @@
   "kv_namespaces": [
     { "binding": "PLAYS", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }
   ],
-  // Frame-by-frame simulation movement artifacts live in R2. Tinybird stores
-  // the object key on simulation_runs and keeps only queryable run/event data.
+  // Each /api/simulate run writes its full Replay (frames = the movement paths,
+  // plus the play-by-play) to R2 under its simId; GET /api/simulate/{id} reads it
+  // back so a chosen run can be played on the court. No analytics persistence.
   // Create before deploy:
   //   wrangler r2 bucket create simulation-artifacts
   "r2_buckets": [
@@ -26,7 +27,4 @@
   ]
   // Secrets (set with `wrangler secret put <NAME>`, or via .dev.vars locally):
   //   BALLDONTLIE_API_KEY, CORS_ORIGIN
-  //   TINYBIRD_HOST, TINYBIRD_TOKEN — when both are set, POST /api/simulate
-  //   ships the run + play-by-play to Tinybird and movements to R2. Unset =
-  //   analytics/artifact ingestion is skipped. See packages/tinybird/README.md.
 }

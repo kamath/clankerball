@@ -5,8 +5,8 @@
    ============================================================ */
 "use client";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import type { BuildMatchupInput, GameConfig } from "@repo/shared";
-import { fetchAllPlayers, fetchMatchup, fetchTeams, searchPlays } from "./api";
+import type { BuildMatchupInput } from "@repo/shared";
+import { fetchAllPlayers, fetchMatchup, fetchTeams } from "./api";
 
 /** The NBA team list for the picker. Static per season, so cache hard. */
 export function useTeams() {
@@ -38,18 +38,5 @@ export function useBuildMatchup() {
   return useMutation({
     mutationKey: ["matchup"],
     mutationFn: (input: BuildMatchupInput) => fetchMatchup(input),
-  });
-}
-
-/** Saved plays for the current matchup, so the library can offer prior
-    possessions before the court. Keyed by `version` — which bumps whenever the
-    loaded config changes (new matchup / roster swap) — so switching configs
-    re-searches for plays that match the new one. */
-export function useConfigPlays(config: GameConfig, version: number) {
-  return useQuery({
-    queryKey: ["configPlays", version],
-    queryFn: () => searchPlays(config),
-    retry: false,
-    staleTime: 30_000,
   });
 }

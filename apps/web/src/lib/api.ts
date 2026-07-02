@@ -10,7 +10,7 @@
    ============================================================ */
 "use client";
 import { createApiClient } from "@repo/api/client";
-import type { BuildMatchupInput, GameConfig, SimulateRequest } from "@repo/shared";
+import type { BuildMatchupInput, SimulateRequest } from "@repo/shared";
 
 /** Origin of the backend Worker that hosts the API. The /api base path is
     baked into the route types, so this is just the origin. Configure per
@@ -51,12 +51,21 @@ export async function fetchMatchup(input: BuildMatchupInput) {
 }
 
 /** Run a staged lab possession on the backend Worker `count` times (each run is
-    an independent random outcome); returns the list of recorded Replays
-    ({ meta, frames }) for the client to play back. */
+    an independent random outcome); returns one summary per run — outcome, points,
+    and the full play-by-play. Each run's frames (paths) are pulled separately via
+    `fetchSimReplay` when a run is played back. */
 export async function fetchSimulation(input: SimulateRequest, count = 1) {
   const res = await api.api.simulate.$post({ json: { ...input, count } });
   if (!res.ok) throw await toError(res);
-  return res.json(); // inferred: Replay[]
+  return res.json(); // inferred: BatchRun[]
+}
+
+/** Pull a simulated run's full Replay (its paths + play-by-play) back from R2 by
+    simId, so a chosen run can be played back on the court. */
+export async function fetchSimReplay(simId: string) {
+  const res = await api.api.simulate[":id"].$get({ param: { id: simId } });
+  if (!res.ok) throw await toError(res);
+  return res.json(); // inferred: Replay
 }
 
 /** Persist a staged play to KV; returns its content-addressed id for building
@@ -72,20 +81,4 @@ export async function fetchPlay(id: string) {
   const res = await api.api.plays[":id"].$get({ param: { id } });
   if (!res.ok) throw await toError(res);
   return res.json(); // inferred: SimulateRequest
-}
-
-/** List prior plays run on a matchup (exact config match), newest first — the
-    matchup's play library, read back from simulation analytics. */
-export async function searchPlays(config: GameConfig) {
-  const res = await api.api.library.search.$post({ json: { config } });
-  if (!res.ok) throw await toError(res);
-  return res.json(); // inferred: PlaySummary[]
-}
-
-/** Load a recorded play by its analytics sim id — the authored request plus the
-    exact replay that ran, ready to stage and play back. */
-export async function fetchLibraryPlay(simId: string) {
-  const res = await api.api.library[":id"].$get({ param: { id: simId } });
-  if (!res.ok) throw await toError(res);
-  return res.json(); // inferred: StoredPlay
 }

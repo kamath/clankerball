@@ -256,6 +256,27 @@ export const PlaySummarySchema = z.object({
 });
 export type PlaySummary = z.infer<typeof PlaySummarySchema>;
 
+/* ---------- batch run results ----------
+   One /simulate call runs N possessions in memory and returns one item per run:
+   the outcome line + points, which side had the ball, and the full play-by-play.
+   Frames (the movement "paths") are NOT inline — they're written to R2 and pulled
+   on demand by `simId` via GET /simulate/{id}, keeping this list light. */
+export const BatchRunSchema = z.object({
+  /** handle for this run — the key used to pull its paths (Replay) from R2 */
+  simId: z.string(),
+  /** the possession's outcome, verbatim from the play-by-play */
+  result: z.string(),
+  /** points the offense scored on the possession (0 on a miss/turnover) */
+  points: z.number(),
+  /** which side had the ball (0 = teamA, 1 = teamB) */
+  offense: z.number(),
+  /** display name of the team on offense */
+  offenseTeam: z.string(),
+  /** the full play-by-play for this run, in emission order */
+  events: z.array(SimEventSchema),
+});
+export type BatchRun = z.infer<typeof BatchRunSchema>;
+
 /* ---------- drift guards: schema inference must match the hand-written
    interfaces the engine relies on. These are compile-time only. ---------- */
 type Assert<T extends true> = T;

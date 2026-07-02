@@ -1,19 +1,17 @@
 "use client";
 import { useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { Check, Play, Share2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useGame } from "@/hooks/useGame";
-import { useBuildMatchup, useConfigPlays, useTeams } from "@/lib/queries";
-import { fetchLibraryPlay, savePlay } from "@/lib/api";
+import { useBuildMatchup, useTeams } from "@/lib/queries";
+import { savePlay } from "@/lib/api";
 import type { GameConfig, PlayerConfig, SimulateRequest } from "@repo/shared";
 import { BatchOutcomes } from "./BatchOutcomes";
 import { Court } from "./Court";
 import { Feed } from "./Feed";
-import { PlayLibrary } from "./PlayLibrary";
 import { PossessionLab } from "./PossessionLab";
 import { RosterEditor } from "./RosterEditor";
 import { ShotClock } from "./ShotClock";
@@ -84,55 +82,21 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
   // share-link state: idle → the saved /play/{id} url once copied
   const [shareStatus, setShareStatus] = useState<"idle" | "saving" | "copied">("idle");
   // how many possessions the header Run button simulates in one go
-  const [runCount, setRunCount] = useState(1);
-  const queryClient = useQueryClient();
-
-  // The matchup's play library: prior possessions recorded on this exact config.
-  // Keyed by game.version so it re-searches when the matchup / roster changes.
-  const { data: plays = [] } = useConfigPlays(game.getConfig(), game.version);
-  // Show the library over the court on load / config change, until dismissed or
-  // a play is picked. Reset the dismissal whenever the matchup changes.
-  const [libraryDismissed, setLibraryDismissed] = useState(false);
-  const [loadingPlay, setLoadingPlay] = useState<string | null>(null);
-  useEffect(() => {
-    setLibraryDismissed(false);
-  }, [game.version]);
-  // A freshly-run possession is auto-recorded; refresh the library so it shows up.
-  useEffect(() => {
-    if (game.labPhase === "ended") {
-      queryClient.invalidateQueries({ queryKey: ["configPlays"] });
-    }
-  }, [game.labPhase, queryClient]);
-
-  const showLibrary = !libraryDismissed && plays.length > 0;
-
-  // Editing any config (the plan, the court, or the roster) sets the previous
-  // plays aside and reveals the court so the edit can be re-simulated. This
-  // replaces the old explicit "Build a new play" button.
-  const startEditing = () => setLibraryDismissed(true);
-
-  // Pick a recorded play: load its exact replay and reveal the court to watch it.
-  const onSelectPlay = async (simId: string) => {
-    setLoadingPlay(simId);
-    try {
-      const stored = await fetchLibraryPlay(simId);
-      game.playStored(stored.request, stored.replay);
-      setLibraryDismissed(true);
-    } catch {
-      /* leave the library open so another play can be tried */
-    } finally {
-      setLoadingPlay(null);
-    }
-  };
+  const [runCount, setRunCount] = useState(100);
 
   // Run the staged (or already-run) play runCount times. runLab captures the
-  // current formation; reRunLab re-runs the last authored play. Both record every
-  // run to the library and play back the first.
+  // current formation; reRunLab re-runs the last authored play. Both play back
+  // the first run; every run's paths are pulled from R2 on demand.
   const canRun = game.labPhase === "staged" || game.labPhase === "ended";
   const onRunBatch = () => {
     if (game.labPhase === "staged") game.runLab(runCount);
     else if (game.labPhase === "ended") game.reRunLab(runCount);
   };
+
+  // Once a batch's results are loaded, the plays list takes over the left panel
+  // (replacing the Teams / Play Lab tabs) and the court's play-by-play sits below
+  // the simulation. A single run keeps the normal editing layout.
+  const showPlays = game.simOutcomes.length > 1;
 
   const onShare = async () => {
     const play = game.capturePlay();
@@ -206,6 +170,15 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[420px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)]">
+        {showPlays ? (
+          <BatchOutcomes
+            outcomes={game.simOutcomes}
+            activeSimId={game.activeSimId}
+            durationMs={game.simDurationMs}
+            onSelect={game.playRun}
+            className="min-h-0 flex-1"
+          />
+        ) : (
         <Tabs value={labTab} onValueChange={setLabTab} className="flex min-h-0 flex-col">
           <TabsList className="h-auto w-full justify-start gap-6 rounded-none border-b border-border bg-transparent p-0">
             <TabsTrigger
@@ -233,14 +206,8 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
                 selectedTeamIds={teamIds}
                 teamLoading={teamLoading}
                 onSelectTeam={selectTeam}
-                onEdit={(...args) => {
-                  startEditing();
-                  game.editPlayer(...args);
-                }}
-                onSwap={(...args) => {
-                  startEditing();
-                  game.swapPlayer(...args);
-                }}
+                onEdit={game.editPlayer}
+                onSwap={game.swapPlayer}
               />
             </ScrollArea>
           </TabsContent>
@@ -255,21 +222,15 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
                 teams={game.boxTeams}
                 labPhase={game.labPhase}
                 labTool={game.labTool}
-                onEdit={startEditing}
                 onStage={game.stageLab}
-                onToolChange={(t) => {
-                  startEditing();
-                  game.setLabTool(t);
-                }}
-                onClearPaths={() => {
-                  startEditing();
-                  game.clearLabPaths();
-                }}
+                onToolChange={game.setLabTool}
+                onClearPaths={game.clearLabPaths}
                 initialPlay={game.version === 0 ? initialPlay : undefined}
               />
             </ScrollArea>
           </TabsContent>
         </Tabs>
+        )}
 
         <div className="relative flex flex-col gap-4">
           <ShotClock snapshot={snapshot} />
@@ -288,19 +249,12 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
             onReRun={() => game.reRunLab()}
             onReset={game.resetLab}
           />
-          {game.simOutcomes.length > 1 ? (
-            <BatchOutcomes outcomes={game.simOutcomes} className="h-[220px]" />
-          ) : (
-            <Feed
-              events={game.labEvents}
-              snapshot={snapshot}
-              title="Possession play-by-play"
-              className="h-[220px]"
-            />
-          )}
-          {showLibrary && (
-            <PlayLibrary plays={plays} loadingId={loadingPlay} onSelect={onSelectPlay} />
-          )}
+          <Feed
+            events={game.labEvents}
+            snapshot={snapshot}
+            title="Possession play-by-play"
+            className="h-[220px]"
+          />
         </div>
       </main>
     </div>
