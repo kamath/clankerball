@@ -143,6 +143,9 @@ export interface Player extends Ratings {
   markSlot?: number;
   /** seconds left rolling to the rim after setting a screen */
   rollTimer: number;
+  /** continuous seconds spent in the (attacked) key — drives the offensive
+      and defensive 3-second rules */
+  keyTime: number;
   /** assigned slot in a zone defense, -1 when unassigned */
   zoneIdx: number;
   /** role label drawn on the court during lab possessions */

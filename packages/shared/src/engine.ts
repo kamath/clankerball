@@ -117,8 +117,10 @@ export const SPOTS: Spot[] = [
   { ax: 16.5, ay: 0, cat: "mid" }, // free-throw area
   { ax: 7, ay: -13, cat: "mid" }, // short corners
   { ax: 7, ay: 13, cat: "mid" },
-  { ax: 4.5, ay: -5.5, cat: "inside" }, // blocks
-  { ax: 4.5, ay: 5.5, cat: "inside" },
+  // the blocks sit at the lane line, like real post position — inside the
+  // paint you duck in and out (offensive 3-second rule)
+  { ax: 4.5, ay: -8.6, cat: "inside" }, // blocks
+  { ax: 4.5, ay: 8.6, cat: "inside" },
   { ax: 2.5, ay: -9, cat: "inside" }, // dunker spots
   { ax: 2.5, ay: 9, cat: "inside" },
 ];
@@ -400,6 +402,7 @@ export class Game {
       spotIdx: -1,
       spotTimer: 0,
       rollTimer: 0,
+      keyTime: 0,
       zoneIdx: -1,
       annotation: null,
       path: null,
@@ -549,6 +552,83 @@ export class Game {
       }
     }
   }
+  /** Is `pos` inside the key (paint) in front of the hoop `offTeam` attacks?
+      The lane is 16 ft wide and runs 19 ft out from the baseline. */
+  inKey(pos: Vec, offTeam: number) {
+    if (Math.abs(pos.y - COURT.H / 2) > 8) return false;
+    return this.hoops[offTeam].x > COURT.W / 2 ? pos.x > COURT.W - 19 : pos.x < 19;
+  }
+
+  /** Nearest step-out point clear of the lane. Placed well past the line so
+      players cross it at speed instead of decelerating on top of it. */
+  paintExit(p: Player): Vec {
+    const hoop = this.hoops[this.possession];
+    const yEdge = p.pos.y >= COURT.H / 2 ? COURT.H / 2 + 11 : COURT.H / 2 - 11;
+    const xEdge = hoop.x > COURT.W / 2 ? COURT.W - 22.5 : 22.5;
+    return Math.abs(yEdge - p.pos.y) <= Math.abs(xEdge - p.pos.x)
+      ? { x: p.pos.x, y: yEdge }
+      : { x: xEdge, y: p.pos.y };
+  }
+
+  /** Offensive & defensive three-second rules. Accrues each player's
+      continuous time in the attacked key, steers players back out before
+      the whistle (duck in, clear out — like real bigs), and calls the rare
+      violation that slips through. Returns true if a whistle stopped play. */
+  updatePaintRules(dt: number): boolean {
+    const off = this.possession;
+    // both counts only run while the offense controls the ball in the
+    // frontcourt; a shot, loose ball, or inbound resets everyone
+    const ctrl =
+      !this.ball.loose &&
+      !(this.ball.flight && this.ball.flight.kind !== "pass") &&
+      this.inFrontcourt(this.ball.pos, off);
+    if (!ctrl) {
+      for (const p of this.allPlayers()) p.keyTime = 0;
+      return false;
+    }
+    const holder = this.ball.holder;
+    const f = this.ball.flight;
+    for (const p of this.teams[off].players) {
+      if (!this.inKey(p.pos, off)) {
+        p.keyTime = 0;
+        continue;
+      }
+      p.keyTime += dt;
+      if (p.keyTime > 3) {
+        p.stats.tov++;
+        this.emit("turnover", `Three seconds in the key on ${p.name} — turnover`, p.team);
+        this.setupInbound(1 - off, this.oobSpot(p.pos), { sc: 24 });
+        return true;
+      }
+      // camped too long: clear out past the nearest lane line. A driving
+      // handler is finishing his own action, catchers meet the pass, and
+      // an authored lab route is the user's to run.
+      const steer =
+        p === holder
+          ? p.keyTime > 2.0 && !p.driving
+          : p.keyTime > 1.6 && f?.catcher !== p && !(p.path && p.pathIdx < p.path.length);
+      if (steer) p.moveTarget = this.paintExit(p);
+    }
+    for (const p of this.teams[1 - off].players) {
+      // legal as long as he's actively guarding someone within arm's length
+      const guarding = this.teams[off].players.some((o) => dist(o.pos, p.pos) < 3.5);
+      if (!this.inKey(p.pos, off) || guarding) {
+        p.keyTime = 0;
+        continue;
+      }
+      p.keyTime += dt;
+      if (p.keyTime > 3) {
+        // no free-throw machinery: call it and hand the offense a fresh clock
+        this.emit("info", `Defensive three seconds on ${p.name} — illegal defense`, p.team);
+        this.shotClock = Math.max(this.shotClock, 14);
+        p.keyTime = 0;
+        continue;
+      }
+      if (p.keyTime > 1.8) p.moveTarget = this.paintExit(p);
+    }
+    return false;
+  }
+
   oobSpot(p: Vec) {
     const dl = p.x,
       dr = COURT.W - p.x,
@@ -603,6 +683,7 @@ export class Game {
     }
     this.updateOffense(dt);
     this.updateDefense();
+    if (this.updatePaintRules(dt)) return;
     if (this.ball.loose) this.updateLoose(dt);
     this.moveAll(dt);
     if (this.ball.flight) this.updateFlight(dt);
@@ -854,7 +935,8 @@ export class Game {
         !(this.ball.flight && this.ball.flight.catcher === target)
       ) {
         const side = target.pos.y >= COURT.H / 2 ? 1 : -1;
-        target.moveTarget = this.spotPos(team, { ax: 4.5, ay: side * 5.5, cat: "inside" });
+        // seal at the block, outside the lane — step in on the entry pass
+        target.moveTarget = this.spotPos(team, { ax: 4.5, ay: side * 8.6, cat: "inside" });
         handled.add(target);
       }
     }
@@ -934,7 +1016,11 @@ export class Game {
     if (!cands.length) cands = SPOTS.map((s, i) => i).filter((i) => !taken.has(i));
     p.spotIdx = pick(cands);
     claims.set(p.id, p.spotIdx);
-    p.spotTimer = rand(3, 7);
+    // a spot inside the lane is a duck-in, not a camp — the 3-second rule
+    // (and real spacing) says get in, look for the ball, get out
+    p.spotTimer = this.inKey(this.spotPos(p.team, SPOTS[p.spotIdx]), p.team)
+      ? rand(1.0, 2.0)
+      : rand(3, 7);
   }
 
   /* ---------- defense ---------- */
@@ -1187,7 +1273,9 @@ export class Game {
     }
     h.decisionTimer -= dt;
     if (h.decisionTimer <= 0) {
-      h.decisionTimer = rand(0.45, 0.9);
+      // survey-dribble-decide rhythm: roughly one read per second, so the
+      // ball doesn't ping-pong; late clock the reads come faster
+      h.decisionTimer = this.shotClock < 6 ? rand(0.4, 0.7) : rand(0.7, 1.2);
       this.decide(h);
     }
   }
@@ -1197,6 +1285,18 @@ export class Game {
     const hoop = this.hoops[h.team];
     if (sc < 1.1 || this.gameClock < 1.6) {
       this.attemptShot(h, true);
+      return;
+    }
+
+    // holding the ball in the lane with the 3-second count running:
+    // go up with it or dribble back out — nobody stands there
+    if (!h.driving && h.keyTime > 1.2 && this.inKey(h.pos, h.team)) {
+      const sv = this.shotValue(h, h.pos);
+      if (sv.value >= 0.95 || sc < 6) {
+        this.attemptShot(h, false);
+      } else {
+        h.moveTarget = this.paintExit(h);
+      }
       return;
     }
 
@@ -1281,7 +1381,7 @@ export class Game {
     }
     const dv = this.driveValue(h);
     const noise = (110 - h.iq) * 0.003;
-    let need = Math.max(0.92, 1.58 - (24 - clamp(sc, 0, 24)) * 0.045);
+    let need = Math.max(0.92, 1.52 - (24 - clamp(sc, 0, 24)) * 0.045);
     // eager shooters fire earlier, reluctant ones hold out for better looks
     need *= clamp(1 - (h.tend.shoot - 50) * 0.004, 0.8, 1.25);
     // shot-hunting from deep: high three-tendency discounts the bar for triples
@@ -1314,6 +1414,9 @@ export class Game {
     // no defender anywhere near the ball: the open look in hand is worth
     // more than hunting a marginally better one
     if (my.defD >= 6) need *= clamp(1 - (my.defD - 6) * 0.045, 0.68, 1);
+    // in rhythm off the catch: an open catch-and-shoot look gets let fly
+    if (this.sinceCatch < 1.2 && !h.driving && my.type !== "inside" && my.defD >= 4.5)
+      need *= 0.92;
 
     // numbers on the break: attack the rim before the defense loads up
     if (breaking && !h.driving) {
@@ -1336,14 +1439,21 @@ export class Game {
     let driveGate = clamp(0.6 + (h.tend.drive - 50) * 0.008, 0.15, 0.95);
     if (myPrio === 0) driveGate = Math.min(0.95, driveGate + 0.25);
     else if (myPrio > 0) driveGate = Math.min(0.95, driveGate + 0.12);
+    // clock burning down: stop surveying and get downhill
+    if (sc < 7) driveGate = Math.min(0.95, driveGate + 0.2);
     if (!h.driving && Math.random() < driveGate && dv + rand(-noise, noise) >= need * 0.9) {
       h.driving = true;
       h.driveSide = Math.random() < 0.5 ? -1 : 1;
       return;
     }
     if (best && sc > 2.5) {
+      // pass with purpose: swing it when a teammate has a genuinely better
+      // look; the aimless hot-potato swing is rare
       let passBias =
-        (bestVal > my.value + 0.03 ? 0.75 : 0.3) * clamp(0.5 + h.tend.pass * 0.01, 0.4, 1.5);
+        (bestVal > my.value + 0.12 ? 0.65 : 0.18) * clamp(0.5 + h.tend.pass * 0.01, 0.4, 1.5);
+      // early clock the ball moves to probe the defense; crunch time it
+      // stays in the decision-maker's hands
+      passBias *= sc > 16 ? 1.2 : sc < 8 ? 0.55 : 1;
       // the primary option holds the ball more, working for his own shot
       if (h === focus) passBias *= 0.45;
       // don't swing away from your own wide-open look to a worse one
@@ -1656,7 +1766,12 @@ export class Game {
     }
     this.ball.holder = f.catcher!;
     f.catcher!.allowOOB = false;
-    f.catcher!.decisionTimer = rand(0.25, 0.6);
+    // catch, read the floor, then act — quick enough for catch-and-shoot,
+    // slow enough that the ball doesn't ping-pong around the horn. a catch
+    // inside the lane demands an immediate decision (the count is running)
+    f.catcher!.decisionTimer = this.inKey(f.catcher!.pos, this.possession)
+      ? rand(0.2, 0.45)
+      : rand(0.4, 0.9);
     this.sinceCatch = 0;
     this.lastPasser = f.passer!;
     if (f.kind === "inbound") {
@@ -1898,6 +2013,7 @@ export class Game {
         q.spotIdx = -1;
         q.spotTimer = 0;
         q.rollTimer = 0;
+        q.keyTime = 0;
         q.zoneIdx = -1;
         q.path = null;
         q.pathIdx = 0;
@@ -2039,6 +2155,7 @@ export class Game {
         p.spotIdx = -1;
         p.spotTimer = 0;
         p.rollTimer = 0;
+        p.keyTime = 0;
         p.zoneIdx = -1;
         p.path = null;
         p.pathIdx = 0;
@@ -2122,6 +2239,7 @@ export class Game {
         p.spotIdx = -1;
         p.spotTimer = 0;
         p.rollTimer = 0;
+        p.keyTime = 0;
         p.zoneIdx = -1;
         p.path = null;
         p.pathIdx = 0;
@@ -2209,6 +2327,7 @@ export class Game {
         p.spotIdx = -1;
         p.spotTimer = 0;
         p.rollTimer = 0;
+        p.keyTime = 0;
         p.zoneIdx = -1;
         p.path = null;
         p.pathIdx = 0;
