@@ -25,6 +25,9 @@ interface PossessionLabProps {
   onStage: (opts: PossessionOpts) => void;
   onToolChange: (t: LabTool) => void;
   onClearPaths: () => void;
+  /** fired the first time the user touches the config, so the caller can set
+      the matchup's previous plays aside and reveal the court to re-simulate. */
+  onEdit?: () => void;
   /** a shared play to preload: seeds the offense + plans and restores the
       authored formation onto the first stage. */
   initialPlay?: SimulateRequest;
@@ -39,6 +42,7 @@ export function PossessionLab({
   onStage,
   onToolChange,
   onClearPaths,
+  onEdit,
   initialPlay,
 }: PossessionLabProps) {
   const [offense, setOffense] = useState(initialPlay?.offense ?? 0);
@@ -72,6 +76,7 @@ export function PossessionLab({
   // Wipe the plan for the side currently being edited, then re-seed the editors
   // (bumping the key remounts them onto the fresh, now-blank plan).
   const clearPlan = () => {
+    onEdit?.();
     setPlans((p) => (planTab === "defense" ? { ...p, defPlan: null } : { ...p, plan: null }));
     setBuildSeed((s) => s + 1);
   };
@@ -88,6 +93,7 @@ export function PossessionLab({
               variant={offense === ti ? "secondary" : "outline"}
               disabled={!configurable}
               onClick={() => {
+                onEdit?.();
                 setOffense(ti);
                 // plans reference roster slots of a specific side
                 setPlans({ plan: null, defPlan: null });
@@ -116,7 +122,10 @@ export function PossessionLab({
             context="lab-offense"
             initialPlan={plans.plan}
             disabled={!configurable}
-            onApply={(plan) => setPlans((p) => ({ ...p, plan }))}
+            onApply={(plan) => {
+              onEdit?.();
+              setPlans((p) => ({ ...p, plan }));
+            }}
           />
         </TabsContent>
         <TabsContent value="defense" forceMount className="data-[state=inactive]:hidden">
@@ -127,7 +136,10 @@ export function PossessionLab({
             context="lab-defense"
             initialPlan={plans.defPlan}
             disabled={!configurable}
-            onApply={(defPlan) => setPlans((p) => ({ ...p, defPlan }))}
+            onApply={(defPlan) => {
+              onEdit?.();
+              setPlans((p) => ({ ...p, defPlan }));
+            }}
           />
         </TabsContent>
       </Tabs>

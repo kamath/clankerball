@@ -3,13 +3,13 @@
    PlayLibrary — the "previous plays on this matchup" panel shown
    over the court before you start building. Each recorded play is
    a clickable row showing its outcome ("Wembanyama buries the
-   triple"); picking one plays that possession back. Dismiss to
-   reveal the court and design a new play. Populated from
-   simulation analytics for the exact current config, so it
-   re-searches whenever the matchup or roster changes.
+   triple"); picking one plays that possession back. Editing the
+   config (in the lab / roster panel) sets these aside and reveals
+   the court to build a new play. Populated from simulation
+   analytics for the exact current config, so it re-searches
+   whenever the matchup or roster changes.
    ============================================================ */
-import { Loader2, Plus } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PlaySummary } from "@repo/shared";
 
@@ -18,7 +18,6 @@ interface PlayLibraryProps {
   /** the sim id currently being loaded, if any (shows a spinner on that row) */
   loadingId: string | null;
   onSelect: (simId: string) => void;
-  onDismiss: () => void;
 }
 
 /** ClickHouse DateTime64 ("YYYY-MM-DD HH:MM:SS.mmm", UTC) → a short local time. */
@@ -33,20 +32,15 @@ function whenLabel(ts: string): string {
   });
 }
 
-export function PlayLibrary({ plays, loadingId, onSelect, onDismiss }: PlayLibraryProps) {
+export function PlayLibrary({ plays, loadingId, onSelect }: PlayLibraryProps) {
   return (
     <div className="absolute inset-0 z-10 flex flex-col rounded-md border bg-background/95 backdrop-blur-sm">
-      <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
-        <div>
-          <h2 className="text-sm font-semibold">Previous plays on this matchup</h2>
-          <p className="text-xs text-muted-foreground">
-            {plays.length} recorded {plays.length === 1 ? "possession" : "possessions"} — pick one to
-            watch the replay
-          </p>
-        </div>
-        <Button size="sm" onClick={onDismiss} className="gap-1.5 whitespace-nowrap">
-          <Plus className="size-3.5" /> Build a new play
-        </Button>
+      <div className="border-b px-4 py-3">
+        <h2 className="text-sm font-semibold">Previous plays on this matchup</h2>
+        <p className="text-xs text-muted-foreground">
+          {plays.length} recorded {plays.length === 1 ? "possession" : "possessions"} — pick one to
+          watch the replay, or edit the config to build a new play
+        </p>
       </div>
 
       {/* Plain overflow container (not Radix ScrollArea): its viewport wraps

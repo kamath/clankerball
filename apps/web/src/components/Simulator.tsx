@@ -34,8 +34,8 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
   const { data: teams = [] } = useTeams();
   const { snapshot } = game;
   const names = snapshot.teamMeta;
-  // active sub-tab within the lab panel (designer / teams + roster edit)
-  const [labTab, setLabTab] = useState("lab");
+  // active sub-tab within the lab panel (teams + roster edit / designer)
+  const [labTab, setLabTab] = useState("teams");
   // each team's full roster, so the editor can swap a starter for a teammate
   const [rosters, setRosters] = useState<[PlayerConfig[], PlayerConfig[]]>(() =>
     rostersOf(initialConfig)
@@ -62,6 +62,11 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
   }, [game.labPhase, queryClient]);
 
   const showLibrary = !libraryDismissed && plays.length > 0;
+
+  // Editing any config (the plan, the court, or the roster) sets the previous
+  // plays aside and reveals the court so the edit can be re-simulated. This
+  // replaces the old explicit "Build a new play" button.
+  const startEditing = () => setLibraryDismissed(true);
 
   // Pick a recorded play: load its exact replay and reveal the court to watch it.
   const onSelectPlay = async (simId: string) => {
@@ -123,10 +128,79 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
         </Button>
       </header>
 
-      <ShotClock snapshot={snapshot} />
+      <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[420px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)]">
+        <Tabs value={labTab} onValueChange={setLabTab} className="flex min-h-0 flex-col">
+          <TabsList className="h-auto w-full justify-start gap-6 rounded-none border-b border-border bg-transparent p-0">
+            <TabsTrigger
+              value="teams"
+              className="rounded-none border-b-2 border-transparent px-1 pb-2.5 pt-0 text-base font-semibold text-muted-foreground shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+            >
+              Teams
+            </TabsTrigger>
+            <TabsTrigger
+              value="lab"
+              className="rounded-none border-b-2 border-transparent px-1 pb-2.5 pt-0 text-base font-semibold text-muted-foreground shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+            >
+              Play Lab
+            </TabsTrigger>
+          </TabsList>
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_420px] lg:grid-rows-[minmax(0,1fr)]">
+          {/* Teams: load a real matchup up top, then edit whoever's on the
+              court below — the roster editor reflects the loaded lineup. */}
+          <TabsContent value="teams" className="flex-1 min-h-0">
+            <ScrollArea className="h-full pr-3">
+              <div className="flex flex-col gap-4">
+                <TeamPicker
+                  teams={teams}
+                  onLoad={(config) => {
+                    game.newGame(config);
+                    setRosters(rostersOf(config));
+                  }}
+                />
+                <RosterEditor
+                  teams={game.boxTeams}
+                  rosters={rosters}
+                  onEdit={(...args) => {
+                    startEditing();
+                    game.editPlayer(...args);
+                  }}
+                  onSwap={(...args) => {
+                    startEditing();
+                    game.swapPlayer(...args);
+                  }}
+                />
+              </div>
+            </ScrollArea>
+          </TabsContent>
+
+          {/* forceMount keeps the staged possession alive while you peek at the
+              Teams tab; a new matchup bumps game.version, which remounts the
+              designer on a fresh formation. */}
+          <TabsContent value="lab" forceMount className="flex-1 min-h-0 data-[state=inactive]:hidden">
+            <ScrollArea className="h-full pr-3">
+              <PossessionLab
+                key={game.version}
+                teams={game.boxTeams}
+                labPhase={game.labPhase}
+                labTool={game.labTool}
+                onEdit={startEditing}
+                onStage={game.stageLab}
+                onToolChange={(t) => {
+                  startEditing();
+                  game.setLabTool(t);
+                }}
+                onClearPaths={() => {
+                  startEditing();
+                  game.clearLabPaths();
+                }}
+                initialPlay={game.version === 0 ? initialPlay : undefined}
+              />
+            </ScrollArea>
+          </TabsContent>
+        </Tabs>
+
         <div className="relative flex flex-col gap-4">
+          <ShotClock snapshot={snapshot} />
           <Court
             canvasRef={game.canvasRef}
             playing={game.playing}
@@ -149,61 +223,9 @@ export function Simulator({ initialConfig, initialPlay }: SimulatorProps) {
             className="h-[220px]"
           />
           {showLibrary && (
-            <PlayLibrary
-              plays={plays}
-              loadingId={loadingPlay}
-              onSelect={onSelectPlay}
-              onDismiss={() => setLibraryDismissed(true)}
-            />
+            <PlayLibrary plays={plays} loadingId={loadingPlay} onSelect={onSelectPlay} />
           )}
         </div>
-
-        <Tabs value={labTab} onValueChange={setLabTab} className="flex min-h-0 flex-col">
-          <TabsList className="grid grid-cols-2">
-            <TabsTrigger value="lab">Play Lab</TabsTrigger>
-            <TabsTrigger value="teams">Teams</TabsTrigger>
-          </TabsList>
-
-          {/* forceMount keeps the staged possession alive while you peek at the
-              Teams tab; a new matchup bumps game.version, which remounts the
-              designer on a fresh formation. */}
-          <TabsContent value="lab" forceMount className="flex-1 min-h-0 data-[state=inactive]:hidden">
-            <ScrollArea className="h-full pr-3">
-              <PossessionLab
-                key={game.version}
-                teams={game.boxTeams}
-                labPhase={game.labPhase}
-                labTool={game.labTool}
-                onStage={game.stageLab}
-                onToolChange={game.setLabTool}
-                onClearPaths={game.clearLabPaths}
-                initialPlay={game.version === 0 ? initialPlay : undefined}
-              />
-            </ScrollArea>
-          </TabsContent>
-
-          {/* Teams: load a real matchup up top, then edit whoever's on the
-              court below — the roster editor reflects the loaded lineup. */}
-          <TabsContent value="teams" className="flex-1 min-h-0">
-            <ScrollArea className="h-full pr-3">
-              <div className="flex flex-col gap-4">
-                <TeamPicker
-                  teams={teams}
-                  onLoad={(config) => {
-                    game.newGame(config);
-                    setRosters(rostersOf(config));
-                  }}
-                />
-                <RosterEditor
-                  teams={game.boxTeams}
-                  rosters={rosters}
-                  onEdit={game.editPlayer}
-                  onSwap={game.swapPlayer}
-                />
-              </div>
-            </ScrollArea>
-          </TabsContent>
-        </Tabs>
       </main>
     </div>
   );
