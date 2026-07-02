@@ -1,0 +1,5 @@
+# vite
+dist/
+
+# TanStack Router generates src/routeTree.gen.ts. It's committed (so typecheck
+# works without a build first); the vite plugin keeps it in sync on dev/build.

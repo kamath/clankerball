@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "hono/jsx",
+    // tsc follows the imported @repo/api source, which uses fetch + process.env,
+    // so this app needs Node types on top of the base lib.
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -1,0 +1,18 @@
+DESCRIPTION >
+    The sequence of play-by-play events emitted while a possession ran, one
+    row per event in emission order (`seq`, oldest first). Mirrors the engine's
+    SimEvent: a typed, human-readable call with the team it belongs to and the
+    game clock it happened at.
+
+SCHEMA >
+    `sim_id` String `json:$.sim_id`,
+    `timestamp` DateTime64(3) `json:$.timestamp`,
+    `seq` UInt32 `json:$.seq`,
+    `type` LowCardinality(String) `json:$.type`,
+    `text` String `json:$.text`,
+    `team` Int8 `json:$.team`,
+    `q_label` String `json:$.q_label`,
+    `clock` String `json:$.clock`
+
+ENGINE "MergeTree"
+ENGINE_SORTING_KEY "sim_id, seq"

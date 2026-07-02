@@ -1,0 +1,14 @@
+{
+    "host": "https://api.us-west-2.aws.tinybird.co",
+    "id": "2a079fba-421e-4b1f-9052-b8c72f3cc865",
+    "name": "anirudh_workspace",
+    "scope": "user",
+    "token": "p.eyJ1IjogIjJhMDc5ZmJhLTQyMWUtNGIxZi05MDUyLWI4YzcyZjNjYzg2NSIsICJpZCI6ICI0ZDIwOWUyNi1kMTI2LTQ4YTUtYTRmNi04ZjQ4Y2I2MGYxNjQiLCAiaG9zdCI6ICJhd3MtdXMtd2VzdC0yIn0.Hhgy9NzSin7r6qqWGKR7JKCRMlY1sgt4UEswvAgzFJs",
+    "tokens": {
+        "https://api.us-west-2.aws.tinybird.co": "p.eyJ1IjogIjJhMDc5ZmJhLTQyMWUtNGIxZi05MDUyLWI4YzcyZjNjYzg2NSIsICJpZCI6ICI0ZDIwOWUyNi1kMTI2LTQ4YTUtYTRmNi04ZjQ4Y2I2MGYxNjQiLCAiaG9zdCI6ICJhd3MtdXMtd2VzdC0yIn0.Hhgy9NzSin7r6qqWGKR7JKCRMlY1sgt4UEswvAgzFJs"
+    },
+    "user_email": "anirudh@kamath.io",
+    "user_id": "163be109-b686-4494-bac0-ed46b9e07afa",
+    "user_token": "p.eyJ1IjogIjE2M2JlMTA5LWI2ODYtNDQ5NC1iYWMwLWVkNDZiOWUwN2FmYSIsICJpZCI6ICJhNzk3NzliZS1jNGZhLTQ1ZmEtYTgzZS0yNjQzMGJjMWY2MWUiLCAiaG9zdCI6ICJhd3MtdXMtd2VzdC0yIn0.cyj7myr0sx3iRf0iHKCS_b9UllB3BP4AcjjJoTq4gXA",
+    "version": "4.5.2"
+}

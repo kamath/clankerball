@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  // nodejs_compat (with a compat date >= 2025-04-01) populates process.env from
+  // vars + secrets, which is how @repo/api reads BALLDONTLIE_API_KEY.
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  // Shareable play configs live in KV, keyed by a content hash of the payload
+  // (see POST /api/plays). `wrangler dev` simulates this locally via miniflare,
+  // so the placeholder id below is fine for dev; before deploying, run
+  //   wrangler kv namespace create PLAYS
+  // and paste the returned id here (and a preview_id for `wrangler dev --remote`).
+  "kv_namespaces": [
+    { "binding": "PLAYS", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }
+  ],
+  // Frame-by-frame simulation movement artifacts live in R2. Tinybird stores
+  // the object key on simulation_runs and keeps only queryable run/event data.
+  // Create before deploy:
+  //   wrangler r2 bucket create simulation-artifacts
+  "r2_buckets": [
+    { "binding": "SIMULATION_ARTIFACTS", "bucket_name": "simulation-artifacts" }
+  ]
+  // Secrets (set with `wrangler secret put <NAME>`, or via .dev.vars locally):
+  //   BALLDONTLIE_API_KEY, CORS_ORIGIN
+  //   TINYBIRD_HOST, TINYBIRD_TOKEN — when both are set, POST /api/simulate
+  //   ships the run + play-by-play to Tinybird and movements to R2. Unset =
+  //   analytics/artifact ingestion is skipped. See packages/tinybird/README.md.
+}
