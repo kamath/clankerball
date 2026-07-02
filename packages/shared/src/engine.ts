@@ -1163,11 +1163,13 @@ export class Game {
       h.moveTarget = { x: hoop.x, y: hoop.y + h.driveSide * 1.5 };
       const dHoop = dist(h.pos, hoop);
       // drive-and-kick: if the help collapses on the way down, spray
-      // it out to an open shooter on the arc
+      // it out to an open shooter on the arc. an uncontested runway to
+      // the rim is the best shot there is — never kick out of one.
       if (dHoop > 5 && dHoop < 18 && this.shotClock > 2.5) {
-        const kick = this.kickoutTarget(h);
+        const blockers = this.laneBlockers(h);
+        const kick = blockers > 0 || near.d < 6 ? this.kickoutTarget(h) : null;
         if (kick) {
-          const pressure = near.d < 3.5 || this.laneBlockers(h) >= 2;
+          const pressure = near.d < 3.5 || blockers >= 2;
           const rate =
             (0.45 + h.iq * 0.009) *
             clamp(0.15 + (h.tend.kickout - 30) * 0.012, 0.05, 1.1) *
@@ -1230,10 +1232,18 @@ export class Game {
     }
 
     const { focus, scorers } = this.roles;
+    const my = this.shotValue(h, h.pos);
+    // point-blank with nobody home: just finish, don't overthink it
+    if (my.type === "inside" && my.defD >= 5 && my.value >= 1.2) {
+      this.attemptShot(h, false);
+      return;
+    }
+    // a wide-open quality look in hand beats working the offense for one
+    const wideOpenLook = my.defD >= 6 && my.value >= 1.25;
     // work the ball to the designated scoring options in priority order: feed
     // the first one who's open in the frontcourt. the primary option gets the
     // ball on a lighter window; lower options have to be more clearly open.
-    if (sc > 5) {
+    if (sc > 5 && !wideOpenLook) {
       for (let i = 0; i < scorers.length; i++) {
         const s = scorers[i];
         if (s === h || !this.inFrontcourt(s.pos, h.team)) continue;
@@ -1244,7 +1254,6 @@ export class Game {
       }
     }
 
-    const my = this.shotValue(h, h.pos);
     const teamFga = this.teams[h.team].players.reduce((s, q) => s + q.stats.fga, 0);
     const avgFga = teamFga / 5;
     let best: Player | null = null,
@@ -1302,6 +1311,9 @@ export class Game {
     const myPrio = scorers.indexOf(h);
     if (myPrio === 0) need *= 0.88;
     else if (myPrio > 0) need *= 0.95;
+    // no defender anywhere near the ball: the open look in hand is worth
+    // more than hunting a marginally better one
+    if (my.defD >= 6) need *= clamp(1 - (my.defD - 6) * 0.045, 0.68, 1);
 
     // numbers on the break: attack the rim before the defense loads up
     if (breaking && !h.driving) {
@@ -1334,6 +1346,8 @@ export class Game {
         (bestVal > my.value + 0.03 ? 0.75 : 0.3) * clamp(0.5 + h.tend.pass * 0.01, 0.4, 1.5);
       // the primary option holds the ball more, working for his own shot
       if (h === focus) passBias *= 0.45;
+      // don't swing away from your own wide-open look to a worse one
+      if (my.defD >= 6 && my.value > bestVal) passBias *= 0.25;
       if (Math.random() < passBias) {
         this.tryPass(h, best);
         return;
@@ -1352,6 +1366,16 @@ export class Game {
     };
   }
 
+  /* Shot probability model, calibrated against real NBA shooting splits.
+     `base` is the OPEN-look probability (no defender within 6 ft); the
+     contest penalty walks it back down toward league contested numbers.
+     Ratings are league-relative (the scout maps season stats so that
+     ~58 = league average, ±14 ≈ one league σ), so the anchors are:
+       rim, open      ~80% at layup 58  (NBA uncontested rim: 80-90%)
+       rim, contested ~60s              (NBA restricted area overall: ~65%)
+       three, open    ~37% at 3pt 58    (NBA wide-open 3: ~38%)
+       three, tight   ~high 20s         (NBA tight 3: ~30%)
+       mid, open      ~45% at mid 52    (NBA open mid: ~45%) */
   shotValue(p: Player, pos: Vec) {
     const hoop = this.hoops[p.team];
     const d = dist(pos, hoop);
@@ -1360,16 +1384,16 @@ export class Game {
     let type: "inside" | "three" | "mid", base: number;
     if (d <= 4.6) {
       type = "inside";
-      base = 0.46 + p.layup * 0.0034 - (d - 1) * 0.012;
+      base = 0.62 + p.layup * 0.0032 - (d - 1) * 0.03;
     } else if (d >= 29) {
       type = "three";
       base = 0.04 + p.threePoint * 0.001; // desperation heave
     } else if (isThree) {
       type = "three";
-      base = 0.135 + p.threePoint * 0.0035 - (d - 22) * 0.008; // deep = harder
+      base = 0.17 + p.threePoint * 0.0034 - (d - 22) * 0.008; // deep = harder
     } else {
       type = "mid";
-      base = 0.24 + p.midRange * 0.0036 - (d - 5) * 0.004; // long 2s = worst shot
+      base = 0.28 + p.midRange * 0.0034 - (d - 5) * 0.005; // long 2s = worst shot
     }
     const no = this.nearestOppTo(p.team, pos);
     let pen = 0;
@@ -1380,7 +1404,7 @@ export class Game {
       const effH = no.p.heightIn + (no.p.vertical - 50) * 0.06;
       pen =
         ((6 - no.d) / 6) *
-        ((type === "inside" ? 0.115 : 0.09) +
+        ((type === "inside" ? 0.16 : 0.09) +
           dRating * 0.0014 +
           clamp(effH - p.heightIn, -5, 7) * 0.01);
       // strength matters when finishing through bodies inside
@@ -1691,7 +1715,8 @@ export class Game {
     let label = sv.type as string;
     if (sv.type === "inside" && h.dunk >= 50 && sv.d < 3.4 && Math.random() < (h.dunk - 35) / 80) {
       label = "dunk";
-      prob = clamp(0.55 + h.dunk * 0.0034 - (sv.defD < 2.5 ? 0.12 : 0), 0.05, 0.97);
+      // dunks are near-automatic unless somebody is there to challenge
+      prob = clamp(0.72 + h.dunk * 0.0022 - (sv.defD < 2.5 ? 0.14 : 0), 0.05, 0.97);
     }
     if (forced) prob -= 0.06;
     if (h.driving && sv.type !== "inside") prob -= 0.05;
