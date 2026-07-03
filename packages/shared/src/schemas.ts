@@ -38,6 +38,7 @@ const optionalRatings = {
   steal: z.number().optional(),
   block: z.number().optional(),
   rebound: z.number().optional(),
+  freeThrow: z.number().optional(),
 };
 
 export const PlayerConfigSchema = z.object({
@@ -117,6 +118,15 @@ export const TeamPlanSchema = z.object({
   actions: z.array(PlanActionSchema),
   directives: z.array(PlayerDirectiveSchema),
   defScheme: z.enum(["man", "switch", "zone"]).nullable(),
+  // defaults keep plans saved before matchups/doubles existed loadable
+  matchups: z
+    .array(z.object({ defenderSlot: slot, targetSlot: slot }))
+    .nullable()
+    .default(null),
+  double: z
+    .object({ doublerSlot: slot.nullable(), targetSlot: slot })
+    .nullable()
+    .default(null),
   pace: z.enum(["fast", "normal", "slow"]).nullable(),
   inbound: z.enum(["full", "side-top", "side-bot", "base-top", "base-bot"]).nullable(),
   inbounderSlot: slot.nullable(),
@@ -215,6 +225,8 @@ export const SimEventSchema = z.object({
     "recover",
     "loose",
     "pass",
+    "foul",
+    "freethrow",
     "info",
   ]),
   text: z.string(),

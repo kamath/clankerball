@@ -32,6 +32,21 @@ export interface PlayerDirective {
   tendencyBias: Partial<Tendencies> | null;
 }
 
+/** One pinned defensive assignment: this team's defender (by roster slot)
+    guards that opposing roster slot. Unlisted defenders are auto-matched. */
+export interface MatchupPair {
+  defenderSlot: number;
+  targetSlot: number;
+}
+
+/** A coached double-team: when the opposing `targetSlot` holds the ball in
+    the frontcourt, `doublerSlot` leaves his man to trap (null = whichever
+    helper is nearest). */
+export interface DoubleTeam {
+  doublerSlot: number | null;
+  targetSlot: number;
+}
+
 export interface TeamPlan {
   /** who initiates the offense; null = best ball-handler */
   handlerSlot: number | null;
@@ -41,6 +56,10 @@ export interface TeamPlan {
   directives: PlayerDirective[];
   /** how THIS team defends when the other team has the ball */
   defScheme: DefScheme | null;
+  /** pinned man-to-man assignments (who guards who); null/[] = auto */
+  matchups: MatchupPair[] | null;
+  /** send a double at a chosen opponent when he has the ball */
+  double: DoubleTeam | null;
   pace: "fast" | "normal" | "slow" | null;
   /** lab only: where the scripted possession inbounds from */
   inbound: InboundLoc | null;
@@ -94,12 +113,32 @@ export function sanitizePlan(raw: TeamPlan): TeamPlan {
         tendencyBias: bias,
       };
     });
+  // matchups: valid slots only, one assignment per defender and per target
+  // (first entry wins), so the engine always applies a clean permutation
+  const seenDef = new Set<number>();
+  const seenTgt = new Set<number>();
+  const matchups = (raw.matchups ?? []).filter((m) => {
+    if (!okSlot(m.defenderSlot) || !okSlot(m.targetSlot)) return false;
+    if (seenDef.has(m.defenderSlot) || seenTgt.has(m.targetSlot)) return false;
+    seenDef.add(m.defenderSlot);
+    seenTgt.add(m.targetSlot);
+    return true;
+  });
+  const double =
+    raw.double && okSlot(raw.double.targetSlot)
+      ? {
+          doublerSlot: okSlot(raw.double.doublerSlot) ? raw.double.doublerSlot : null,
+          targetSlot: raw.double.targetSlot,
+        }
+      : null;
   return {
     handlerSlot: okSlot(raw.handlerSlot) ? raw.handlerSlot : null,
     scorerSlots,
     actions,
     directives,
     defScheme: raw.defScheme ?? null,
+    matchups: matchups.length ? matchups : null,
+    double,
     pace: raw.pace ?? null,
     inbound: raw.inbound ?? null,
     inbounderSlot: okSlot(raw.inbounderSlot) ? raw.inbounderSlot : null,

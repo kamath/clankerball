@@ -37,6 +37,7 @@ const SECTIONS: [string, Row[]][] = [
     ["midRange", "MID-RANGE", 25, 99],
     ["layup", "LAYUP", 25, 99],
     ["dunk", "DUNK", 25, 99],
+    ["freeThrow", "FREE THROW", 25, 99],
     ["ballHandle", "BALL HANDLE", 25, 99],
     ["passAcc", "PASS ACCURACY", 25, 99],
   ]],

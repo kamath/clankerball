@@ -53,6 +53,8 @@ export function fillRatings(cfg: PlayerConfig): Partial<Ratings> {
   r.steal = F(cfg.steal, 50);
   r.block = F(cfg.block, (cfg.heightIn - 72) * 4 + cfg.dunk * 0.3);
   r.rebound = F(cfg.rebound, (cfg.heightIn - 66) * 3.5 + (cfg.weightLb - 160) * 0.15);
+  // touch travels: good jump shooters are good free-throw shooters
+  r.freeThrow = F(cfg.freeThrow, cfg.midRange * 0.6 + cfg.threePoint * 0.4);
   return r;
 }
 
@@ -261,6 +263,10 @@ interface Flight {
   defD?: number;
   defName?: string | null;
   prob?: number;
+  /** the shooter was fouled on a made basket — one FT coming */
+  andOne?: boolean;
+  /** this flight is a free-throw attempt */
+  ft?: boolean;
 }
 
 interface Loose {
@@ -270,6 +276,10 @@ interface Loose {
   isRebound: boolean;
   touchTeam: number;
   phase?: number;
+  /** seconds the ball is still in the AIR off the rim — a rebound is caught
+      at hand height during this window (the NBA board) and only hits the
+      floor if nobody gets to it */
+  airborne?: number;
 }
 
 interface Ball {
@@ -339,6 +349,11 @@ export class Game {
   /** jump-ball state: game and OT periods open with a tip, not an inbound */
   tipoff = false;
   jumpers: Player[] = [];
+  /** team fouls this quarter, per team — 5+ puts the other side in the bonus */
+  teamFouls: [number, number] = [0, 0];
+  /** a free-throw sequence in progress: the game clock is dead and step()
+      drives nothing but the shooter's attempts until it resolves */
+  ftState: { shooter: Player; remaining: number; total: number; timer: number } | null = null;
 
   constructor(cfg: GameConfig, opts: GameOpts = {}) {
     this.onEvent = opts.onEvent || (() => {});
@@ -408,7 +423,7 @@ export class Game {
       path: null,
       pathIdx: 0,
       pathHold: true,
-      stats: { pts: 0, fgm: 0, fga: 0, tpm: 0, tpa: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0 },
+      stats: { pts: 0, fgm: 0, fga: 0, tpm: 0, tpa: 0, ftm: 0, fta: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0, pf: 0 },
     } as Player;
   }
 
@@ -467,6 +482,22 @@ export class Game {
         }
         if (!improved) break;
       }
+    }
+  }
+
+  /** Pin the coach's explicit man assignments (plan.matchups) on top of the
+      auto matchups: each named defender takes the named attacker, trading
+      marks with whoever had him so the assignment stays a permutation. */
+  applyPlanMatchups(team: number) {
+    const pairs = this.tactics[team]?.plan?.matchups;
+    if (!pairs?.length) return;
+    const defs = this.teams[team].players;
+    for (const { defenderSlot, targetSlot } of pairs) {
+      const d = defs[defenderSlot];
+      if (!d || d.markSlot === targetSlot) continue;
+      const cur = defs.find((q) => q.markSlot === targetSlot);
+      if (cur) cur.markSlot = d.markSlot;
+      d.markSlot = targetSlot;
     }
   }
 
@@ -644,6 +675,10 @@ export class Game {
   /* ---------- main loop ---------- */
   step(dt: number) {
     if (this.over || this.frozen) return;
+    if (this.ftState) {
+      this.stepFreeThrows(dt);
+      return;
+    }
     if (this.phase === "setup") {
       if (!this.tipoff) this.updateDefense();
       this.moveAll(dt);
@@ -768,6 +803,12 @@ export class Game {
   /* ---------- off-ball offense ---------- */
   updateOffense(dt: number) {
     if (this.ball.loose) return;
+    // the shot is in the air: crashers attack the glass at the release,
+    // everyone else starts finding floor balance
+    if (this.ball.flight?.kind === "shot" && !this.ball.flight.ft) {
+      this.crashGlass();
+      return;
+    }
     if (this.fastBreak > 0) {
       this.transitionOffense();
       return;
@@ -944,6 +985,29 @@ export class Game {
     return handled;
   }
 
+  /** While a live shot flies: inclined (or already-deep) teammates attack
+      the offensive glass so they're under the carom when it comes off —
+      real crashers move at the release, not after the bounce. */
+  crashGlass() {
+    const f = this.ball.flight!;
+    const off = f.shooter!.team;
+    const hoop = this.hoops[off];
+    const dir = hoop.x > COURT.W / 2 ? -1 : 1; // toward the floor
+    for (const p of this.teams[off].players) {
+      if (p === f.shooter) continue;
+      const d = dist(p.pos, hoop);
+      if (p.tend.crash >= 55 || d < 13) {
+        // carve out rebounding position in front of the rim, split by side
+        const side = p.pos.y >= hoop.y ? 1 : -1;
+        p.moveTarget = {
+          x: hoop.x + dir * (3 + (p.slot % 3)),
+          y: hoop.y + side * (2 + (p.slot % 2) * 3.5),
+        };
+      }
+      // everyone else holds his spot — safe floor balance
+    }
+  }
+
   /** Fill the lanes: rim runner, two corner sprinters, a trailer. */
   transitionOffense() {
     const hoop = this.hoops[this.possession];
@@ -1096,6 +1160,43 @@ export class Game {
       }
       p.moveTarget = { x: tx, y: ty };
     }
+    this.applyDoubleTeam(defTeam, lunged);
+  }
+
+  /** Coached double-team: when the marked man has the ball in the frontcourt,
+      the chosen doubler (or the nearest helper) abandons his man and traps the
+      ball. The man he leaves is open — that's the gamble. */
+  applyDoubleTeam(defTeam: number, lunged: Set<Player>) {
+    const dbl = this.tactics[defTeam].plan?.double;
+    const holder = this.ball.holder;
+    if (
+      !dbl ||
+      !holder ||
+      holder.team !== this.possession ||
+      holder.slot !== dbl.targetSlot ||
+      !this.inFrontcourt(holder.pos, this.possession)
+    )
+      return;
+    const defs = this.teams[defTeam].players;
+    let doubler: Player | null = dbl.doublerSlot != null ? (defs[dbl.doublerSlot] ?? null) : null;
+    // no named doubler: the nearest defender not already on the ball comes
+    if (!doubler) {
+      let bd = Infinity;
+      for (const p of defs) {
+        if (p.markSlot === holder.slot) continue;
+        const d = dist(p.pos, holder.pos);
+        if (d < bd) {
+          bd = d;
+          doubler = p;
+        }
+      }
+    }
+    if (!doubler || lunged.has(doubler) || doubler.markSlot === holder.slot) return;
+    // close from where he stands so the trap converges from a second angle
+    const dx = doubler.pos.x - holder.pos.x;
+    const dy = doubler.pos.y - holder.pos.y;
+    const L = Math.hypot(dx, dy) || 1;
+    doubler.moveTarget = { x: holder.pos.x + (dx / L) * 1.4, y: holder.pos.y + (dy / L) * 1.4 };
   }
 
   /** Scramble defense while the break is on: deepest man protects the
@@ -1229,18 +1330,35 @@ export class Game {
     const near = this.nearestOppTo(h.team, h.pos);
     if (near.d < 2.0) {
       const gam = 0.6 + near.p.tend.gamble * 0.008;
+      // a trap (two bodies on the ball) multiplies the turnover pressure
+      const crowd = this.teams[1 - h.team].players.filter(
+        (o) => dist(o.pos, h.pos) < 2.6
+      ).length;
       const rate = clamp(
         (0.003 + near.p.steal * 0.00008 + (h.driving ? 0.01 : 0)) *
           gam *
-          (1.5 - h.ballHandle * 0.008),
+          (1.5 - h.ballHandle * 0.008) *
+          (1 + 0.7 * Math.max(0, crowd - 1)),
         0.001,
-        0.045
+        0.09
       );
       if (Math.random() < rate * dt) {
         near.p.stats.stl++;
         h.stats.tov++;
         this.emit("steal", pick(LINES.steal)(near.p.name, h.name), near.p.team);
         this.gainPossession(near.p, { live: true });
+        return;
+      }
+      // reach-in: hands get lazy digging at a live dribble. Gamblers and
+      // undisciplined defenders hack more; a downhill handler draws more.
+      const foulRate = clamp(
+        (0.005 + near.p.tend.gamble * 0.00008 + (h.driving ? 0.01 : 0)) *
+          (1 + (50 - near.p.iq) * 0.006),
+        0.0005,
+        0.03
+      );
+      if (Math.random() < foulRate * dt) {
+        this.commonFoul(near.p, h);
         return;
       }
     }
@@ -1250,10 +1368,11 @@ export class Game {
       const dHoop = dist(h.pos, hoop);
       // drive-and-kick: if the help collapses on the way down, spray
       // it out to an open shooter on the arc. an uncontested runway to
-      // the rim is the best shot there is — never kick out of one.
-      if (dHoop > 5 && dHoop < 18 && this.shotClock > 2.5) {
+      // the rim is the best shot there is — never kick out of one, and a
+      // beaten defender trailing the play doesn't count as pressure.
+      if (dHoop > 6 && dHoop < 18 && this.shotClock > 2.5) {
         const blockers = this.laneBlockers(h);
-        const kick = blockers > 0 || near.d < 6 ? this.kickoutTarget(h) : null;
+        const kick = blockers > 0 || near.d < 4 ? this.kickoutTarget(h) : null;
         if (kick) {
           const pressure = near.d < 3.5 || blockers >= 2;
           const rate =
@@ -1268,6 +1387,23 @@ export class Game {
       }
       if (dHoop < 4.2) {
         this.attemptShot(h, false);
+        return;
+      }
+    }
+    // daylight is read every frame, not on the survey rhythm: a beaten
+    // defense inside ~10 ft gets attacked in a fraction of a second
+    if (!h.driving && this.inFrontcourt(h.pos, h.team)) {
+      const hoop = this.hoops[h.team];
+      const dH = dist(h.pos, hoop);
+      if (
+        dH > 3 &&
+        dH < 10 &&
+        near.d > 3.2 &&
+        this.laneBlockers(h) === 0 &&
+        Math.random() < 3.5 * dt // ~0.3s reaction time
+      ) {
+        h.driving = true;
+        h.driveSide = h.pos.y >= hoop.y ? 1 : -1;
         return;
       }
     }
@@ -1331,15 +1467,45 @@ export class Game {
       return;
     }
 
+    const dHoop = dist(h.pos, hoop);
+    // already downhill with the lane still open (or at the rack): the read
+    // was made when the drive started — stay on the attack. Re-reads only
+    // happen when the defense has actually loaded up; pressured kick-outs
+    // live in updateHandler.
+    if (
+      h.driving &&
+      (dHoop < 6 ||
+        (this.laneBlockers(h) === 0 && this.nearestOppTo(h.team, h.pos).d > 3))
+    ) {
+      return;
+    }
+
     const { focus, scorers } = this.roles;
     const my = this.shotValue(h, h.pos);
-    // point-blank with nobody home: just finish, don't overthink it
-    if (my.type === "inside" && my.defD >= 5 && my.value >= 1.2) {
+    // point-blank: a quality look under the rim is the best shot in
+    // basketball — finish it, don't pass out of it. Only a defender right
+    // on his body (smothered) keeps the read alive.
+    if (my.type === "inside" && my.defD >= 3.5 && my.value >= 1.25) {
       this.attemptShot(h, false);
       return;
     }
-    // a wide-open quality look in hand beats working the offense for one
-    const wideOpenLook = my.defD >= 6 && my.value >= 1.25;
+    // blow-by: he's beaten his man inside ~10 feet with a clear runway and
+    // nobody on his hip — there is no read left to make. Attack the rim.
+    if (
+      !h.driving &&
+      dHoop > 3 &&
+      dHoop < 10 &&
+      this.laneBlockers(h) === 0 &&
+      this.nearestOppTo(h.team, h.pos).d > 3.2
+    ) {
+      h.driving = true;
+      h.driveSide = h.pos.y >= hoop.y ? 1 : -1;
+      return;
+    }
+    // a wide-open quality look in hand beats working the offense for one;
+    // a rim look needs far less daylight than a jumper to qualify
+    const wideOpenLook =
+      my.defD >= (my.type === "inside" ? 4 : 6) && my.value >= 1.25;
     // work the ball to the designated scoring options in priority order: feed
     // the first one who's open in the frontcourt. the primary option gets the
     // ball on a lighter window; lower options have to be more clearly open.
@@ -1414,6 +1580,8 @@ export class Game {
     // no defender anywhere near the ball: the open look in hand is worth
     // more than hunting a marginally better one
     if (my.defD >= 6) need *= clamp(1 - (my.defD - 6) * 0.045, 0.68, 1);
+    // a clean look at the rim clears the bar sooner than any jumper
+    if (my.type === "inside" && my.defD >= 3) need *= 0.85;
     // in rhythm off the catch: an open catch-and-shoot look gets let fly
     if (this.sinceCatch < 1.2 && !h.driving && my.type !== "inside" && my.defD >= 4.5)
       need *= 0.92;
@@ -1451,6 +1619,10 @@ export class Game {
       // look; the aimless hot-potato swing is rare
       let passBias =
         (bestVal > my.value + 0.12 ? 0.65 : 0.18) * clamp(0.5 + h.tend.pass * 0.01, 0.4, 1.5);
+      // trapped by a double-team: someone is open — get off the ball
+      const trapped =
+        this.teams[1 - h.team].players.filter((o) => dist(o.pos, h.pos) < 3.2).length >= 2;
+      if (trapped) passBias = Math.max(passBias, 0.85);
       // early clock the ball moves to probe the defense; crunch time it
       // stays in the decision-maker's hands
       passBias *= sc > 16 ? 1.2 : sc < 8 ? 0.55 : 1;
@@ -1579,7 +1751,7 @@ export class Game {
   driveValue(h: Player) {
     const hoop = this.hoops[h.team];
     const d = dist(h.pos, hoop);
-    if (d < 7) return 0;
+    if (d < 4.5) return 0; // already in finishing range
     const blockers = this.laneBlockers(h);
     const press = this.nearestOppTo(h.team, h.pos).d < 2.5 ? 0.08 : 0;
     const fin =
@@ -1835,8 +2007,40 @@ export class Game {
     }
     if (forced) prob -= 0.06;
     if (h.driving && sv.type !== "inside") prob -= 0.05;
+    // shooting foul: tight contests draw whistles, most of all at the rim.
+    // Undisciplined, gambling defenders hack more; a downhill driver gets
+    // more calls than a stationary finisher.
+    let fouled = false;
+    if (def && sv.defD < 6) {
+      const tight = 1 - sv.defD / 6;
+      const base = sv.type === "inside" ? 0.32 : sv.type === "mid" ? 0.08 : 0.03;
+      const hack = 1 + (50 - def.iq) * 0.006 + (def.tend.gamble - 50) * 0.004;
+      const foulP = clamp(
+        base * tight * hack * (h.driving && sv.type === "inside" ? 1.35 : 1),
+        0,
+        0.35
+      );
+      fouled = Math.random() < foulP;
+    }
+    if (fouled && def) {
+      def.stats.pf++;
+      this.teamFouls[def.team]++;
+      prob *= 0.62; // shooting through contact
+    }
     prob = clamp(prob, 0.02, 0.97);
     const made = Math.random() < prob;
+    if (fouled && def && !made) {
+      // whistle, no basket: the miss doesn't count — straight to the line
+      h.driving = false;
+      this.shotClockActive = false;
+      this.emit(
+        "foul",
+        `${def.name} fouls ${h.name} on the ${sv.type === "three" ? "three-point " : ""}shot — ${sv.pts} free throws`,
+        def.team
+      );
+      this.startFreeThrows(h, sv.pts);
+      return;
+    }
     const hoop = this.hoops[h.team];
     const assist =
       made &&
@@ -1861,6 +2065,7 @@ export class Game {
       defD: sv.defD,
       defName: def ? def.name.split(" ").slice(-1)[0] : null,
       prob,
+      andOne: fouled && made,
     };
     this.ball.holder = null;
     this.shotClockActive = false;
@@ -1878,6 +2083,7 @@ export class Game {
   }
 
   resolveShot(f: Flight) {
+    if (f.ft) return this.resolveFreeThrow(f);
     const sh = f.shooter!;
     const T = this.teams[sh.team];
     sh.stats.fga++;
@@ -1894,6 +2100,11 @@ export class Game {
         this.coverageTag(f) +
         ` — ${this.scoreLine()}`;
       this.emit(f.label === "dunk" ? "dunk" : "score", line, sh.team);
+      if (f.andOne) {
+        this.emit("foul", `${sh.name} is fouled on the finish — and one!`, 1 - sh.team);
+        this.startFreeThrows(sh, 1);
+        return;
+      }
       if (this.gameClock <= 0) {
         this.endQuarter();
         return;
@@ -1917,6 +2128,7 @@ export class Game {
         timer: rand(0.55, 1.0),
         isRebound: true,
         touchTeam: sh.team,
+        airborne: rand(0.55, 0.85), // hang time off the iron
       };
     }
   }
@@ -1924,6 +2136,27 @@ export class Game {
   /* ---------- loose balls & rebounds ---------- */
   updateLoose(dt: number) {
     const lb = this.ball.loose!;
+    // ---- airborne phase: the carom is still in the air off the rim ----
+    // The ball flies clean (no floor drag) and comes down toward hands. A
+    // body under it snares the board at hand height — the ball never touches
+    // the floor unless nobody is there to meet it.
+    if (lb.airborne && lb.airborne > 0) {
+      lb.airborne -= dt;
+      lb.pos.x += lb.vel.x * dt;
+      lb.pos.y += lb.vel.y * dt;
+      this.ball.air = clamp(0.25 + lb.airborne * 1.1, 0.2, 1);
+      if (this.looseOutOfBounds(lb)) return;
+      this.chaseLoose(lb);
+      // catchable once it drops into reach
+      if (lb.airborne < 0.45 && this.tryGrabLoose(lb, 2.4)) return;
+      if (lb.airborne <= 0) {
+        // nobody met it: the ball hits the floor and skips
+        lb.airborne = 0;
+        lb.timer = rand(0.15, 0.35);
+      }
+      return;
+    }
+    // ---- floor phase ----
     // two-regime ball physics: while it's hot (skipping and bouncing) the
     // floor scrubs speed off fast; once it settles into a roll, hardwood
     // barely slows it — an errant pass keeps rolling until someone gets it
@@ -1937,16 +2170,29 @@ export class Game {
     const sp = Math.hypot(lb.vel.x, lb.vel.y);
     lb.phase = (lb.phase || 0) + dt * (4 + sp * 0.5);
     this.ball.air = Math.abs(Math.sin(lb.phase * 2.2)) * clamp(sp / 22, 0, 0.45);
-    // rolled out of bounds: last team to touch it loses possession
-    if (lb.pos.x < 0 || lb.pos.x > COURT.W || lb.pos.y < 0 || lb.pos.y > COURT.H) {
-      const toTeam = 1 - lb.touchTeam;
-      this.ball.air = 0;
-      this.emit("turnover", `Loose ball bounces out — ${this.teams[toTeam].name} ball`, toTeam);
-      this.setupInbound(toTeam, this.oobSpot(lb.pos), { sc: 24 });
-      return;
-    }
-    // chase the ball where it's going, not where it is
-    const aim = { x: lb.pos.x + lb.vel.x * 0.3, y: lb.pos.y + lb.vel.y * 0.3 };
+    if (this.looseOutOfBounds(lb)) return;
+    this.chaseLoose(lb);
+    lb.timer -= dt;
+    if (lb.timer > 0) return;
+    const grabR = sp > 8 ? 1.7 : 2.8; // a hot ball is hard to corral
+    this.tryGrabLoose(lb, grabR);
+  }
+
+  /** Rolled/bounced out of bounds: last team to touch it loses possession. */
+  looseOutOfBounds(lb: Loose): boolean {
+    if (lb.pos.x >= 0 && lb.pos.x <= COURT.W && lb.pos.y >= 0 && lb.pos.y <= COURT.H)
+      return false;
+    const toTeam = 1 - lb.touchTeam;
+    this.ball.air = 0;
+    this.emit("turnover", `Loose ball bounces out — ${this.teams[toTeam].name} ball`, toTeam);
+    this.setupInbound(toTeam, this.oobSpot(lb.pos), { sc: 24 });
+    return true;
+  }
+
+  /** Send nearby players after the ball — where it's going, not where it is. */
+  chaseLoose(lb: Loose) {
+    const lead = lb.airborne && lb.airborne > 0 ? lb.airborne : 0.3;
+    const aim = { x: lb.pos.x + lb.vel.x * lead, y: lb.pos.y + lb.vel.y * lead };
     this.teams.forEach((t, ti) => {
       const offTeam = lb.isRebound && ti === this.lastShotTeam;
       const sorted = t.players.slice().sort((a, b) => dist(a.pos, aim) - dist(b.pos, aim));
@@ -1958,11 +2204,13 @@ export class Game {
         }
       });
     });
-    lb.timer -= dt;
-    if (lb.timer > 0) return;
-    const grabR = sp > 8 ? 1.7 : 2.8; // a hot ball is hard to corral
+  }
+
+  /** Contest the ball among everyone within reach; the winner takes
+      possession. Returns false when nobody is close enough yet. */
+  tryGrabLoose(lb: Loose, grabR: number): boolean {
     const cands = this.allPlayers().filter((p) => dist(p.pos, lb.pos) < grabR);
-    if (!cands.length) return; // keep rolling until someone reaches it
+    if (!cands.length) return false;
     let win: Player | null = null,
       wbest = -1;
     for (const p of cands) {
@@ -1997,6 +2245,175 @@ export class Game {
     if (offBoard) this.shotClock = 14;
     // recovering your own blocked shot / errant pass doesn't reset the clock
     if (samePoss) this.shotClock = Math.max(1, scBefore);
+    return true;
+  }
+
+  /* ---------- fouls & free throws ---------- */
+  ftProb(p: Player) {
+    // rating 58 (league average) ≈ 73%; elite shooters live in the low 90s
+    return clamp(0.38 + p.freeThrow * 0.006, 0.3, 0.95);
+  }
+
+  /** A non-shooting defensive foul: side-out for the offense — or two free
+      throws once the defense is in the bonus (5+ team fouls this quarter). */
+  commonFoul(def: Player, victim: Player) {
+    def.stats.pf++;
+    this.teamFouls[def.team]++;
+    const bonus = this.teamFouls[def.team] >= 5;
+    victim.driving = false;
+    this.emit(
+      "foul",
+      `${def.name} reaches in on ${victim.name} — personal foul` +
+        (bonus ? `, and the ${this.teams[victim.team].name} are in the bonus` : ""),
+      def.team
+    );
+    if (bonus) {
+      this.startFreeThrows(victim, 2);
+    } else {
+      // the offense keeps it, side out; the shot clock resets no lower than 14
+      this.setupInbound(victim.team, this.oobSpot(victim.pos), {
+        sc: Math.max(Math.ceil(this.shotClock), 14),
+      });
+    }
+  }
+
+  /** Send `shooter` to the line for `n` attempts: kill the clocks, walk
+      everyone to his lane spot, and let stepFreeThrows run the sequence. */
+  startFreeThrows(shooter: Player, n: number) {
+    this.ball.flight = null;
+    this.ball.loose = null;
+    this.ball.holder = shooter;
+    this.ball.air = 0;
+    this.shotClockActive = false;
+    this.screen = null;
+    this.pnr = null;
+    this.fastBreak = 0;
+    this.lastPasser = null;
+    for (const t of this.teams) {
+      for (const p of t.players) {
+        p.driving = false;
+        p.rollTimer = 0;
+        p.keyTime = 0;
+        p.allowOOB = false;
+        p.path = null;
+        p.pathIdx = 0;
+      }
+    }
+    this.lineUpFreeThrow(shooter);
+    this.ftState = { shooter, remaining: n, total: n, timer: 2.4 };
+  }
+
+  /** Real free-throw geometry: shooter at the line, the defense owning the
+      low blocks, offensive rebounders between them, everyone else spaced
+      out behind the play. */
+  lineUpFreeThrow(shooter: Player) {
+    const off = shooter.team;
+    const at = (ax: number, ay: number) => this.spotPos(off, { ax, ay, cat: "mid" });
+    shooter.moveTarget = at(13.6, 0);
+    const byReb = (ps: Player[]) => ps.slice().sort((a, b) => rebSkillOf(b) - rebSkillOf(a));
+    const defSpots: [number, number][] = [
+      [3.2, -8.6], [3.2, 8.6], [9.6, -8.6], // lane spots
+      [16, 8.6], [30, 0], // above the line + safety back
+    ];
+    byReb(this.teams[1 - off].players).forEach((p, i) => {
+      const [ax, ay] = defSpots[i];
+      p.moveTarget = at(ax, ay);
+    });
+    const offSpots: [number, number][] = [
+      [6.4, -8.6], [6.4, 8.6], // lane rebounders
+      [22, -14], [28, 6], // spaced out top-side
+    ];
+    byReb(this.mates(shooter)).forEach((p, i) => {
+      const [ax, ay] = offSpots[i];
+      p.moveTarget = at(ax, ay);
+    });
+  }
+
+  /** Drive a free-throw sequence: bodies settle onto the lane, the shooter
+      works on a fixed rhythm, and each attempt flies as a normal shot flight
+      that resolveFreeThrow picks up. The game clock is dead throughout. */
+  stepFreeThrows(dt: number) {
+    this.moveAll(dt);
+    if (this.ball.flight) {
+      this.updateFlight(dt);
+      return;
+    }
+    this.ballFollow();
+    const ft = this.ftState!;
+    ft.timer -= dt;
+    if (ft.timer > 0) return;
+    const sh = ft.shooter;
+    const prob = this.ftProb(sh);
+    const hoop = this.hoops[sh.team];
+    this.ball.holder = null;
+    this.ball.flight = {
+      kind: "shot",
+      ft: true,
+      from: { x: sh.pos.x, y: sh.pos.y },
+      to: { x: hoop.x, y: hoop.y },
+      t: 0,
+      dur: 0.85,
+      shooter: sh,
+      made: Math.random() < prob,
+      pts: 1,
+      label: "ft",
+      d: 15,
+      assist: null,
+      defD: 99,
+      defName: null,
+      prob,
+    };
+  }
+
+  resolveFreeThrow(f: Flight) {
+    const ft = this.ftState;
+    const sh = f.shooter!;
+    sh.stats.fta++;
+    const n = ft ? ft.total - ft.remaining + 1 : 1;
+    const total = ft?.total ?? 1;
+    const ordinal = total > 1 ? ` (${n} of ${total})` : "";
+    if (f.made) {
+      sh.stats.ftm++;
+      sh.stats.pts++;
+      this.teams[sh.team].score++;
+      this.emit(
+        "freethrow",
+        `${sh.name} makes the free throw${ordinal} — ${this.scoreLine()}`,
+        sh.team
+      );
+    } else {
+      this.emit("freethrow", `${sh.name} misses the free throw${ordinal}`, sh.team);
+    }
+    if (ft && ft.remaining > 1) {
+      ft.remaining--;
+      ft.timer = 1.7;
+      this.ball.holder = sh;
+      return;
+    }
+    // sequence over: a made last FT is a dead ball the other way; a miss
+    // is live off the rim with the lane already loaded
+    this.ftState = null;
+    this.lastShotTeam = sh.team;
+    if (f.made) {
+      if (this.gameClock <= 0 && !this.lab) {
+        this.endQuarter();
+        return;
+      }
+      this.setupInbound(1 - sh.team, this.baselineSpot(1 - sh.team), { sc: 24 });
+    } else {
+      const hoop = this.hoops[sh.team];
+      const toward = hoop.x > COURT.W / 2 ? Math.PI : 0;
+      const ang = toward + rand(-1.6, 1.6);
+      const carom = rand(3, 7);
+      this.ball.loose = {
+        pos: { x: hoop.x + Math.cos(ang) * 1.2, y: hoop.y + Math.sin(ang) * 1.2 },
+        vel: { x: Math.cos(ang) * carom, y: Math.sin(ang) * carom },
+        timer: rand(0.5, 0.9),
+        isRebound: true,
+        touchTeam: sh.team,
+        airborne: rand(0.5, 0.75),
+      };
+    }
   }
 
   /* ---------- possession / dead balls ---------- */
@@ -2048,6 +2465,10 @@ export class Game {
       }
       p.zoneIdx = -1; // zones re-resolve if the scheme changed
     }
+    // matchups may have changed: re-derive the auto assignments from scratch,
+    // then pin both sides' explicit who-guards-who choices on top
+    this.assignMatchups();
+    for (let ti = 0; ti < 2; ti++) this.applyPlanMatchups(ti);
     this.pnr = null;
     this.pnrCooldown = 0;
     if (this.possession === team && !this.ball.loose) this.setRoles(team);
@@ -2138,6 +2559,7 @@ export class Game {
   setupTipoff() {
     this.phase = "setup";
     this.tipoff = true;
+    this.ftState = null;
     this.deadTimer = rand(1.2, 1.8);
     this.shotClock = 24;
     this.shotClockActive = false;
@@ -2223,6 +2645,7 @@ export class Game {
     }
     this.phase = "setup";
     this.deadTimer = rand(1.2, 2.0);
+    this.ftState = null;
     this.possession = team;
     this.shotClock = opts.sc;
     this.shotClockActive = false;
@@ -2312,6 +2735,7 @@ export class Game {
   setupLive(team: number, opts: { sc: number }) {
     this.phase = "live";
     this.deadTimer = 0;
+    this.ftState = null;
     this.possession = team;
     this.shotClock = opts.sc;
     this.shotClockActive = true;
@@ -2383,6 +2807,8 @@ export class Game {
     this.lab = { team: opts.offense };
     this.frozen = false;
     this.labPending = null;
+    this.ftState = null;
+    this.teamFouls = [0, 0]; // each staged possession opens with a clean slate
     this.setPlan(opts.offense, opts.plan ?? null);
     this.setPlan(1 - opts.offense, opts.defPlan ?? null);
     if (opts.scorers) this.tactics[opts.offense].scorers = opts.scorers;
@@ -2560,6 +2986,8 @@ export class Game {
     this.ball.flight = null;
     this.ball.loose = null;
     this.ball.holder = null;
+    this.ftState = null;
+    this.teamFouls = [0, 0]; // team fouls reset each period
     if (this.lab) {
       this.labEnd();
       return;

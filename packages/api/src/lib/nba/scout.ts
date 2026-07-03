@@ -144,6 +144,7 @@ export function ratePlayer(
     14
   );
   const layup = map(z(s, "fg_pct") * 0.5 + z(s, "fta36") * 0.3, 58, 13) + Math.round(big * 4);
+  const freeThrow = map(z(s, "ft_pct"), 58, 14);
   const dunk = clamp(
     Math.round(30 + big * 46 + clamp(z(s, "blk36"), 0, 3) * 5 + clamp(z(s, "fta36"), 0, 3) * 4),
     25,
@@ -274,6 +275,7 @@ export function ratePlayer(
     midRange,
     layup,
     dunk,
+    freeThrow,
     ballHandle,
     passAcc,
     speed,

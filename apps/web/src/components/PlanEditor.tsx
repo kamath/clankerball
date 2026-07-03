@@ -35,6 +35,8 @@ const BLANK: TeamPlan = {
   actions: [],
   directives: [],
   defScheme: null,
+  matchups: null,
+  double: null,
   pace: null,
   inbound: null,
   inbounderSlot: null,
@@ -47,6 +49,8 @@ const isBlankPlan = (d: TeamPlan) =>
   d.actions.length === 0 &&
   d.directives.length === 0 &&
   !d.defScheme &&
+  !(d.matchups && d.matchups.length) &&
+  !d.double &&
   !d.pace &&
   !d.inbound &&
   d.inbounderSlot === null;
@@ -114,6 +118,9 @@ const actionSurvives = (a: PlanAction) =>
 
 interface PlanEditorProps {
   names: string[];
+  /** the opposing lineup's names — the defense editor needs them to pick
+      matchup assignments and a double-team target */
+  oppNames?: string[];
   /** the offense editor exposes the inbound controls; defense hides them */
   context: "lab-offense" | "lab-defense";
   /** seed value — the plan the editor opens on */
@@ -130,6 +137,7 @@ interface PlanEditorProps {
 
 export function PlanEditor({
   names,
+  oppNames,
   context,
   initialPlan,
   disabled,
@@ -221,6 +229,14 @@ export function PlanEditor({
     });
   const removeDirective = (i: number) =>
     setDraft((d) => ({ ...d, directives: d.directives.filter((_, j) => j !== i) }));
+
+  // one pinned assignment per defender; picking "Auto" drops his pin
+  const setMatchup = (defenderSlot: number, targetSlot: number | null) =>
+    setDraft((d) => {
+      const rest = (d.matchups ?? []).filter((m) => m.defenderSlot !== defenderSlot);
+      const matchups = targetSlot === null ? rest : [...rest, { defenderSlot, targetSlot }];
+      return { ...d, matchups: matchups.length ? matchups : null };
+    });
 
   return (
     <fieldset disabled={disabled} className={`m-0 min-w-0 border-0 p-0 ${className ?? ""}`}>
@@ -344,6 +360,79 @@ export function PlanEditor({
             })}
           </div>
         </Field>
+          </>
+        )}
+
+        {/* Defensive assignments: who guards who + a coached double-team */}
+        {context === "lab-defense" && oppNames && (
+          <>
+            <Field label="Matchups (who guards who)">
+              <div className="flex flex-col gap-1.5">
+                {names.map((n, i) => {
+                  const cur =
+                    draft.matchups?.find((m) => m.defenderSlot === i)?.targetSlot ?? null;
+                  const taken = (draft.matchups ?? [])
+                    .filter((m) => m.defenderSlot !== i)
+                    .map((m) => m.targetSlot);
+                  return (
+                    <div key={i} className="grid grid-cols-[1fr_auto_1.2fr] items-center gap-2">
+                      <span className="truncate text-sm">{n}</span>
+                      <span className="text-xs text-muted-foreground">guards</span>
+                      <SlotSelect
+                        value={cur}
+                        onChange={(t) => setMatchup(i, t)}
+                        names={oppNames}
+                        placeholder="Auto"
+                        omitSlots={taken}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+              {draft.defScheme === "zone" && (
+                <p className="text-xs text-muted-foreground">
+                  Matchups apply to man-to-man and switching schemes, not zone.
+                </p>
+              )}
+            </Field>
+
+            <Field label="Double team">
+              <div className="grid grid-cols-2 gap-2">
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs text-muted-foreground">Trap</span>
+                  <SlotSelect
+                    value={draft.double?.targetSlot ?? null}
+                    onChange={(t) =>
+                      patch({
+                        double:
+                          t === null
+                            ? null
+                            : { targetSlot: t, doublerSlot: draft.double?.doublerSlot ?? null },
+                      })
+                    }
+                    names={oppNames}
+                    placeholder="Nobody"
+                  />
+                </div>
+                {draft.double && (
+                  <div className="flex flex-col gap-1">
+                    <span className="text-xs text-muted-foreground">Doubler</span>
+                    <SlotSelect
+                      value={draft.double.doublerSlot}
+                      onChange={(doublerSlot) =>
+                        patch({ double: { ...draft.double!, doublerSlot } })
+                      }
+                      names={names}
+                      placeholder="Nearest"
+                    />
+                  </div>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                When the trapped man has the ball, the doubler leaves his own
+                man to swarm it — the man he leaves is open.
+              </p>
+            </Field>
           </>
         )}
 

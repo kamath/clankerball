@@ -756,6 +756,7 @@ export function useGame(initialConfig: GameConfig) {
       if (lab.possession !== opts.offense) return false;
       const def = 1 - opts.offense;
       const prevScheme = lab.tactics[def].defScheme;
+      const prevDef = lab.tactics[def].plan;
       // setPlan → setRoles clears dragged hold-spots; those are authored
       // court state, not plan state — keep them
       const held = new Map(lab.assignTargets);
@@ -764,7 +765,12 @@ export function useGame(initialConfig: GameConfig) {
       lab.assignTargets = held;
       const scheme = opts.defPlan?.defScheme ?? "man";
       lab.tactics[def].defScheme = scheme;
-      if (scheme !== prevScheme) lab.labSetDefense(scheme);
+      // re-shape (snap) the staged defenders when anything that moves them
+      // changed: the scheme, pinned matchups, or the double-team assignment
+      const shape = (p: TeamPlan | null | undefined) =>
+        JSON.stringify([p?.matchups ?? null, p?.double ?? null]);
+      if (scheme !== prevScheme || shape(prevDef) !== shape(opts.defPlan))
+        lab.labSetDefense(scheme);
       // a new initiator takes over the ball: he receives the inbound, or
       // holds it where he stands on a live start
       const handler = lab.roles.handler;

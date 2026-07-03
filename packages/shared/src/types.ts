@@ -26,6 +26,7 @@ export interface Ratings {
   steal: number;
   block: number;
   rebound: number;
+  freeThrow: number;
 }
 
 /** Behavioural tendencies, each 1–99 (default 50). */
@@ -110,11 +111,14 @@ export interface PlayerStats {
   fga: number;
   tpm: number;
   tpa: number;
+  ftm: number;
+  fta: number;
   reb: number;
   ast: number;
   stl: number;
   blk: number;
   tov: number;
+  pf: number;
 }
 
 /** A live player object inside a running Game (config + runtime state). */
@@ -180,6 +184,8 @@ export type SimEventType =
   | "recover"
   | "loose"
   | "pass"
+  | "foul"
+  | "freethrow"
   | "info";
 
 export interface SimEvent {

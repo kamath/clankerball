@@ -133,7 +133,15 @@ export function simulatePossession(input: SimulateRequest): Replay {
 
 /* The play-by-play events that resolve a possession, newest wins. A possession
    ends on exactly one of these; passes/rebounds/info are just chatter. */
-const DECISIVE_EVENTS = new Set(["score", "dunk", "miss", "block", "steal", "turnover"]);
+const DECISIVE_EVENTS = new Set([
+  "score",
+  "dunk",
+  "miss",
+  "block",
+  "steal",
+  "turnover",
+  "freethrow",
+]);
 
 /** Distill a recorded possession into a one-line result for the play library:
     the outcome text (verbatim from the play-by-play) and the points the offense

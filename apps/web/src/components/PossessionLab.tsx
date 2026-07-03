@@ -32,6 +32,8 @@ const BLANK_PLAN: TeamPlan = {
   actions: [],
   directives: [],
   defScheme: null,
+  matchups: null,
+  double: null,
   pace: null,
   inbound: null,
   inbounderSlot: null,
@@ -325,6 +327,7 @@ export function PossessionLab({
           <PlanEditor
             key={`def-${buildSeed}`}
             names={defNames}
+            oppNames={offNames}
             context="lab-defense"
             initialPlan={plans.defPlan}
             disabled={!configurable}
