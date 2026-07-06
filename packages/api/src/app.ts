@@ -326,7 +326,7 @@ const routes = base
    type the RPC client, so the OpenAPI doc and the client never drift. */
 routes.doc("/openapi.json", {
   openapi: "3.0.0",
-  info: { version: "0.1.0", title: "Fable Fieldhouse API" },
+  info: { version: "0.1.0", title: "Clankerball API" },
 });
 routes.get("/ui", swaggerUI({ url: "/api/openapi.json" }));
 

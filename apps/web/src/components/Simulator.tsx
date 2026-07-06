@@ -260,7 +260,7 @@ export function Simulator({
             Back
           </Button>
         )}
-        <h1 className="text-xl font-semibold">Fable Fieldhouse</h1>
+        <h1 className="text-xl font-semibold">Clankerball</h1>
         <span className="text-sm text-muted-foreground">
           {isResults ? "Results" : "Play Lab"}
         </span>
