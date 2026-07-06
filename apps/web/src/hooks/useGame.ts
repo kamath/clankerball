@@ -869,7 +869,8 @@ export function useGame(initialConfig: GameConfig) {
       try {
         // Each run returns its outcome + points + simId; frames (paths) stay in
         // R2. Time the batch round-trip so the UI can show how long it took, then
-        // record every run and pull the first run's Replay back to play it.
+        // record every run for the Aggregate tab + possession list. Nothing is
+        // auto-played: the court stays idle until the user picks a possession.
         const started = performance.now();
         const artifact = await fetchSimulation(payload, count);
         setSimDurationMs(performance.now() - started);
@@ -879,12 +880,6 @@ export function useGame(initialConfig: GameConfig) {
         setSimOutcomes(
           artifact.possessions.map((r) => ({ simId: r.simId, result: r.result, points: r.points }))
         );
-        const first = artifact.possessions[0];
-        if (first) {
-          setActiveSimId(first.simId);
-          const rep = await fetchSimReplay(first.simId);
-          loadReplay(rep);
-        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "simulation failed";
         setLabEvents((prev) => [
@@ -897,7 +892,7 @@ export function useGame(initialConfig: GameConfig) {
         setSimulating(false);
       }
     },
-    [loadReplay, setLabPhase]
+    [setLabPhase]
   );
 
   /** Play back a specific run from the current batch on the court: pull its

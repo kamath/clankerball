@@ -14,6 +14,9 @@ interface CourtProps {
   onReplay: () => void;
   onExport: () => void;
   onSetSpeed: (s: number) => void;
+  /** show the playback controls (play/pause/replay/export/speed). The results
+      view hides them — a possession just plays when it's picked from the list. */
+  controls?: boolean;
   /** the Run control (count + submit), rendered at the end of the toolbar */
   runControl?: React.ReactNode;
   /** staging tools (move / draw path / clear paths), rendered under the board */
@@ -29,16 +32,20 @@ export function Court({
   onReplay,
   onExport,
   onSetSpeed,
+  controls = true,
   runControl,
   tools,
 }: CourtProps) {
+  const showControls = controls && canReplay;
+  const showToolbar = showControls || !!tools || !!runControl;
   return (
     <div className="flex flex-col gap-3">
       <canvas ref={canvasRef} className="court-canvas" />
+      {showToolbar && (
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           {tools}
-          {canReplay && (
+          {showControls && (
             <>
               <Button onClick={onTogglePlay} variant="default" className="gap-2">
                 {playing ? <Pause data-icon="inline-start" /> : <Play data-icon="inline-start" />}
@@ -75,6 +82,7 @@ export function Court({
         </div>
         {runControl && <div className="flex items-center gap-2">{runControl}</div>}
       </div>
+      )}
     </div>
   );
 }

@@ -108,21 +108,20 @@ export function Simulator({
   const [submitting, setSubmitting] = useState(false);
 
   // ---- Results view: aggregate → possession filtering ----
-  // Active filters authored by clicking aggregate elements (union semantics: a
-  // possession shows if it matches ANY active filter). Toggling by id lets the
-  // same aggregate element flip its filter on and off.
-  const [filters, setFilters] = useState<PossessionFilter[]>([]);
-  const activeIds = useMemo(() => new Set(filters.map((f) => f.id)), [filters]);
-  const toggleFilter = useCallback((f: PossessionFilter) => {
-    setFilters((prev) =>
-      prev.some((x) => x.id === f.id) ? prev.filter((x) => x.id !== f.id) : [...prev, f]
-    );
-  }, []);
-  const removeFilter = useCallback(
-    (id: string) => setFilters((prev) => prev.filter((x) => x.id !== id)),
+  // A single active filter, authored by clicking an aggregate element: clicking
+  // another element switches the filter to that one, clicking the active element
+  // again (or Clear) resets it. Kept as a set-of-one so the panel/list stay
+  // generic over which element is selected.
+  const [filter, setFilter] = useState<PossessionFilter | null>(null);
+  const activeIds = useMemo(
+    () => (filter ? new Set([filter.id]) : new Set<string>()),
+    [filter]
+  );
+  const selectFilter = useCallback(
+    (f: PossessionFilter) => setFilter((prev) => (prev?.id === f.id ? null : f)),
     []
   );
-  const clearFilters = useCallback(() => setFilters([]), []);
+  const clearFilter = useCallback(() => setFilter(null), []);
 
   // Whether a single possession is opened for replay (its play-by-play under the
   // court) vs. the browsable list. Selecting a run opens it; Back returns.
@@ -310,7 +309,7 @@ export function Simulator({
                 <AggregatePanel
                   artifact={game.simArtifact}
                   activeIds={activeIds}
-                  onToggle={toggleFilter}
+                  onToggle={selectFilter}
                 />
               </ScrollArea>
             </div>
@@ -397,6 +396,7 @@ export function Simulator({
               onReplay={game.replay}
               onExport={game.exportReplay}
               onSetSpeed={game.setSpeed}
+              controls={!isResults}
               runControl={runControl}
               tools={courtTools}
             />
@@ -427,12 +427,12 @@ export function Simulator({
             ) : game.simArtifact ? (
               <PossessionList
                 possessions={game.simArtifact.possessions}
-                filters={filters}
+                filters={filter ? [filter] : []}
                 activeSimId={game.activeSimId}
                 durationMs={game.simDurationMs}
                 onSelect={openPossession}
-                onRemoveFilter={removeFilter}
-                onClear={clearFilters}
+                onRemoveFilter={clearFilter}
+                onClear={clearFilter}
                 className="flex-1"
               />
             ) : null)}
