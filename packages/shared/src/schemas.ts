@@ -213,27 +213,29 @@ export const ReplayFrameSchema = z.object({
 });
 
 export const SimEventSchema = z.object({
-  type: z.enum([
-    "period",
-    "final",
-    "score",
-    "dunk",
-    "miss",
-    "block",
-    "steal",
-    "turnover",
-    "rebound",
-    "recover",
-    "loose",
-    "pass",
-    "foul",
-    "freethrow",
-    "info",
-  ]),
-  text: z.string(),
-  team: z.number().nullable(),
-  qLabel: z.string(),
-  clock: z.string(),
+  type: z
+    .enum([
+      "period",
+      "final",
+      "score",
+      "dunk",
+      "miss",
+      "block",
+      "steal",
+      "turnover",
+      "rebound",
+      "recover",
+      "loose",
+      "pass",
+      "foul",
+      "freethrow",
+      "info",
+    ])
+    .describe("The kind of play this line records."),
+  text: z.string().describe("Human-readable play-by-play line."),
+  team: z.number().nullable().describe("Team the event is credited to: 0 = teamA, 1 = teamB, null = neutral."),
+  qLabel: z.string().describe("Period label, e.g. 'Q1' or 'OT'."),
+  clock: z.string().describe("Game clock when the event fired, 'MM:SS'."),
 });
 
 /* ---------- structured player contributions ---------- */
@@ -271,19 +273,24 @@ export const contribKindEnum = z.enum([
 ]);
 
 export const ContributionSchema = z.object({
-  eventIndex: z.number(),
-  playerId: z.number(),
-  team: z.number(),
-  kind: contribKindEnum,
-  shotType: shotTypeEnum.optional(),
-  points: z.number().optional(),
-  defDist: z.number().optional(),
-  shotQuality: z.number().optional(),
-  openness: opennessEnum.optional(),
-  pullUp: z.boolean().optional(),
-  blocked: z.boolean().optional(),
-  passType: passTypeEnum.optional(),
-  relatedPlayerId: z.number().optional(),
+  eventIndex: z
+    .number()
+    .describe("FK → events.eventIndex within the same simId: the event this contribution belongs to."),
+  playerId: z.number().describe("FK → players.id (global id = team*5 + slot)."),
+  team: z.number().describe("0 = teamA, 1 = teamB."),
+  kind: contribKindEnum.describe("What the player did on this event."),
+  shotType: shotTypeEnum.optional().describe("Range bucket of the shot (shot_make/shot_miss/ft_*)."),
+  points: z.number().optional().describe("Points booked on this contribution (a make or a made free throw)."),
+  defDist: z.number().optional().describe("Defender distance at the shot's release, in feet."),
+  shotQuality: z.number().optional().describe("Engine make-probability at release, 0–1."),
+  openness: opennessEnum.optional().describe("Bucketed defDist."),
+  pullUp: z.boolean().optional().describe("Shot taken off the dribble, not a set catch-and-shoot."),
+  blocked: z.boolean().optional().describe("The shot attempt was swatted."),
+  passType: passTypeEnum.optional().describe("Kind of pass thrown (pass/assist)."),
+  relatedPlayerId: z
+    .number()
+    .optional()
+    .describe("The other player in the play (assister↔shooter, robbed passer↔thief, fouler↔fouled), as players.id."),
 });
 
 export const ReplaySchema = z.object({
@@ -368,58 +375,90 @@ export const simEventTypeEnum = z.enum([
 ]);
 
 export const ArtifactPlayerSchema = z.object({
-  id: z.number(),
-  team: z.number(),
-  slot: z.number(),
-  name: z.string(),
-  number: z.number(),
-  position: z.string(),
-  nbaId: z.number().optional(),
+  id: z.number().describe("Global player id = team*5 + slot; the key contributions.playerId points at."),
+  team: z.number().describe("0 = teamA, 1 = teamB."),
+  slot: z.number().describe("Index within the team's five (0–4)."),
+  name: z.string().describe("Player name."),
+  number: z.number().describe("Jersey number."),
+  position: z.string().describe("Position label (PG/SG/SF/PF/C)."),
+  nbaId: z.number().optional().describe("balldontlie id when sourced from real NBA data."),
 });
 
 export const ArtifactEventSchema = SimEventSchema.extend({
-  simId: z.string(),
-  eventIndex: z.number(),
+  simId: z.string().describe("The run this event belongs to; half of the (simId, eventIndex) key."),
+  eventIndex: z.number().describe("Position within the run's event stream; the other half of the key."),
 });
 
 export const ArtifactContributionSchema = ContributionSchema.extend({
-  simId: z.string(),
+  simId: z.string().describe("The run this contribution belongs to; joins with eventIndex to events."),
 });
 
 export const PossessionSummarySchema = z.object({
-  offense: z.number(),
-  result: z.string(),
-  outcomeType: simEventTypeEnum,
-  points: z.number(),
-  assisted: z.boolean(),
-  passes: z.number(),
-  offReb: z.number(),
-  turnover: z.boolean(),
-  fgAttempted: z.boolean(),
-  fgMade: z.boolean(),
-  shotType: shotTypeEnum.optional(),
-  openness: opennessEnum.optional(),
-  shotQuality: z.number().optional(),
+  offense: z.number().describe("Which side had the ball: 0 = teamA, 1 = teamB."),
+  result: z.string().describe("The possession's outcome, verbatim from the play-by-play."),
+  outcomeType: simEventTypeEnum.describe("The decisive event's type — the coarse outcome bucket."),
+  points: z.number().describe("Points the offense scored on the possession."),
+  assisted: z.boolean().describe("The made field goal had an assist."),
+  passes: z.number().describe("Completed passes thrown by the offense."),
+  offReb: z.number().describe("Offensive rebounds grabbed on the possession."),
+  turnover: z.boolean().describe("Ended in a live-ball turnover (giveaway or steal)."),
+  fgAttempted: z.boolean().describe("A field goal was attempted to end the possession."),
+  fgMade: z.boolean().describe("That field goal went in."),
+  shotType: shotTypeEnum.optional().describe("The final shot's range bucket."),
+  openness: opennessEnum.optional().describe("The final shot's openness."),
+  shotQuality: z.number().optional().describe("The final shot's make-probability at release, 0–1."),
 });
 
 export const ArtifactPossessionSchema = PossessionSummarySchema.extend({
-  simId: z.string(),
+  simId: z.string().describe("FK → events.simId: the run these feature values summarize."),
 });
 
 export const BatchAggregateSchema = z.object({
-  n: z.number(),
-  pointsPerPossession: z.number(),
-  scoredPct: z.number(),
-  assistRate: z.number(),
-  turnoverRate: z.number(),
-  offRebRate: z.number(),
-  avgPasses: z.number(),
-  shotTypeMix: z.record(z.string(), z.number()),
-  opennessMix: z.record(z.string(), z.number()),
-  outcomeHistogram: z.record(z.string(), z.number()),
+  n: z.number().describe("Possessions in the batch."),
+  pointsPerPossession: z.number().describe("Mean points scored per possession."),
+  scoredPct: z.number().describe("Share of possessions that scored (points > 0)."),
+  assistRate: z.number().describe("Share of made field goals that were assisted."),
+  turnoverRate: z.number().describe("Share of possessions ending in a live-ball turnover."),
+  offRebRate: z.number().describe("Share of possessions with at least one offensive rebound."),
+  avgPasses: z.number().describe("Mean completed passes per possession."),
+  shotTypeMix: z.record(z.string(), z.number()).describe("Fraction of shot-ending possessions by shot type."),
+  opennessMix: z.record(z.string(), z.number()).describe("Fraction of shot-ending possessions by openness."),
+  outcomeHistogram: z.record(z.string(), z.number()).describe("Count of possessions by decisive-event type."),
+});
+
+/* ---------- self-documenting data dictionary ----------
+   `meta` travels inside every artifact so a first-time consumer learns the
+   tables, every column's meaning + type + enum domain, and — critically — how
+   the tables join, without any external doc. `tables[*].columns` is generated
+   from the schemas above via z.toJSONSchema(), so it can never drift from the
+   data; only `grain` and `relationships` are hand-authored. */
+
+export const ColumnDocSchema = z.object({
+  type: z.string(),
+  description: z.string().optional(),
+  enum: z.array(z.string()).optional(),
+});
+
+export const TableDocSchema = z.object({
+  grain: z.string(),
+  columns: z.record(z.string(), ColumnDocSchema),
+});
+
+export const RelationshipSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  /** one entry per key column; fromCol may differ from toCol (e.g. playerId → id). */
+  on: z.array(z.object({ fromCol: z.string(), toCol: z.string() })),
+});
+
+export const ArtifactMetaSchema = z.object({
+  version: z.number(),
+  tables: z.record(z.string(), TableDocSchema),
+  relationships: z.array(RelationshipSchema),
 });
 
 export const SimArtifactSchema = z.object({
+  meta: ArtifactMetaSchema,
   config: z.object({
     offense: z.number(),
     offenseTeam: z.string(),

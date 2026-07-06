@@ -17,8 +17,15 @@
    directly by the browser or a CLI (e.g. duckdb `read_json_auto`). No
    storage is involved — this is pure, in-memory, and reused on both ends.
    ============================================================ */
+import { z } from "zod";
 import type { Contribution, GameConfig, SimEvent, ShotType, Openness } from "./types";
 import { summarizePossession, type PossessionSummary, type Replay } from "./replay";
+import {
+  ArtifactContributionSchema,
+  ArtifactEventSchema,
+  ArtifactPlayerSchema,
+  ArtifactPossessionSchema,
+} from "./schemas";
 
 /** One of the ten players on the floor, as a joinable row. */
 export interface ArtifactPlayer {
@@ -73,8 +80,39 @@ export interface BatchAggregate {
   outcomeHistogram: Record<string, number>;
 }
 
+/* ---------- self-documenting data dictionary ---------- */
+
+/** One column's documentation, distilled from the schema's JSON Schema. */
+export interface ColumnDoc {
+  type: string;
+  description?: string;
+  enum?: string[];
+}
+
+/** A table's grain plus its column dictionary. */
+export interface TableDoc {
+  grain: string;
+  columns: Record<string, ColumnDoc>;
+}
+
+/** A join between two tables; fromCol may differ from toCol. */
+export interface Relationship {
+  from: string;
+  to: string;
+  on: { fromCol: string; toCol: string }[];
+}
+
+/** The dictionary carried inside every artifact so it documents itself. */
+export interface ArtifactMeta {
+  version: number;
+  tables: Record<string, TableDoc>;
+  relationships: Relationship[];
+}
+
 /** The full normalized result of running one config N times. */
 export interface SimArtifact {
+  /** the data dictionary — read this first to learn the tables, columns, and joins. */
+  meta: ArtifactMeta;
   config: {
     offense: number;
     offenseTeam: string;
@@ -87,6 +125,85 @@ export interface SimArtifact {
   events: ArtifactEvent[];
   contributions: ArtifactContribution[];
   aggregate: BatchAggregate;
+}
+
+/** The four relational tables, and the one hand-authored fact per table JSON
+    Schema can't derive: its grain. Typed strictly here so a bad name is a
+    compile error; the public ArtifactMeta widens to string for the wire. */
+type TableName = "players" | "possessions" | "events" | "contributions";
+
+const GRAIN: Record<TableName, string> = {
+  players: "one row per player on the floor (both teams)",
+  possessions: "one row per simulated possession",
+  events: "one row per play-by-play line",
+  contributions: "one row per player action on an event",
+};
+
+/** The joins JSON Schema can't express. `on` maps a column on `from` to its
+    counterpart on `to` (they differ for contributions.playerId → players.id). */
+const RELATIONSHIPS: { from: TableName; to: TableName; on: { fromCol: string; toCol: string }[] }[] = [
+  {
+    from: "contributions",
+    to: "events",
+    on: [
+      { fromCol: "simId", toCol: "simId" },
+      { fromCol: "eventIndex", toCol: "eventIndex" },
+    ],
+  },
+  { from: "contributions", to: "players", on: [{ fromCol: "playerId", toCol: "id" }] },
+  { from: "possessions", to: "events", on: [{ fromCol: "simId", toCol: "simId" }] },
+];
+
+/** Pull each column's type/description/enum out of a schema's JSON Schema,
+    resolving any $ref into $defs so shared enums still surface inline. */
+function columnsOf(schema: z.ZodType): Record<string, ColumnDoc> {
+  const js = z.toJSONSchema(schema) as Record<string, any>;
+  const defs: Record<string, any> = js.$defs ?? {};
+  const deref = (d: any): any => (d && d.$ref ? deref(defs[String(d.$ref).split("/").pop() ?? ""] ?? {}) : d);
+  const props: Record<string, any> = js.properties ?? {};
+  const out: Record<string, ColumnDoc> = {};
+  for (const [name, raw] of Object.entries(props)) {
+    const def = deref(raw);
+    const type =
+      typeof def.type === "string"
+        ? def.type
+        : Array.isArray(def.type)
+          ? def.type.join("|")
+          : def.enum
+            ? "string"
+            : "unknown";
+    const col: ColumnDoc = { type };
+    const description = raw.description ?? def.description;
+    if (description) col.description = description;
+    if (def.enum) col.enum = def.enum;
+    out[name] = col;
+  }
+  return out;
+}
+
+/** Assemble the data dictionary, and guard it: every relationship must join
+    columns that actually exist on both tables — so renaming a key that isn't
+    updated here fails loudly instead of shipping a lie. Memoized: the schema
+    is static, so it's derived once. */
+let cachedMeta: ArtifactMeta | null = null;
+function buildMeta(): ArtifactMeta {
+  if (cachedMeta) return cachedMeta;
+  const tables: Record<TableName, TableDoc> = {
+    players: { grain: GRAIN.players, columns: columnsOf(ArtifactPlayerSchema) },
+    possessions: { grain: GRAIN.possessions, columns: columnsOf(ArtifactPossessionSchema) },
+    events: { grain: GRAIN.events, columns: columnsOf(ArtifactEventSchema) },
+    contributions: { grain: GRAIN.contributions, columns: columnsOf(ArtifactContributionSchema) },
+  };
+  for (const r of RELATIONSHIPS) {
+    for (const { fromCol, toCol } of r.on) {
+      if (!(fromCol in tables[r.from].columns))
+        throw new Error(`meta drift: relationship ${r.from} → ${r.to} references missing column ${r.from}.${fromCol}`);
+      if (!(toCol in tables[r.to].columns))
+        throw new Error(`meta drift: relationship ${r.from} → ${r.to} references missing column ${r.to}.${toCol}`);
+    }
+  }
+  cachedMeta = { version: 1, tables, relationships: RELATIONSHIPS };
+  return cachedMeta;
 }
 
 /** Build the joinable player table from a matchup config. Slot is the player's
@@ -172,6 +289,7 @@ export function buildArtifact(input: {
   }
 
   return {
+    meta: buildMeta(),
     config: { offense, offenseTeam, defenseTeam, n: runs.length, plan },
     players: playerRows(config),
     possessions,
