@@ -8,19 +8,33 @@
    ============================================================ */
 import type { PlanAction, TeamPlan } from "./plan";
 import type {
+  ContribInput,
   DefScheme,
   GameConfig,
   GameOpts,
   InboundLoc,
+  Openness,
+  PassType,
   Player,
   PlayerConfig,
   Ratings,
+  ShotType,
   SimEvent,
   SimEventType,
   Tactics,
   TeamRuntime,
   Vec,
 } from "./types";
+
+/** Bucket a defender's release distance (ft) into an openness label. Shared by
+    the play-by-play coverage tag and the structured shot contributions so the
+    two never disagree. */
+function opennessOf(defD: number): Openness {
+  if (defD >= 6) return "wide_open";
+  if (defD >= 4.5) return "open";
+  if (defD >= 2.8) return "contested";
+  return "smothered";
+}
 
 export const COURT = { W: 94, H: 50, HOOP_X: 5.25, ARC: 23.75 };
 
@@ -181,19 +195,6 @@ const LINES: {
   ],
 };
 
-export type PassType =
-  | "chest"
-  | "bounce"
-  | "skip"
-  | "lob"
-  | "entry"
-  | "outlet"
-  | "hitAhead"
-  | "pocket"
-  | "kickout"
-  | "noLook"
-  | "handoff";
-
 type PassLineFn = (p: string, c: string) => string;
 const PASS_LINES: Record<PassType, PassLineFn[]> = {
   chest: [
@@ -293,7 +294,7 @@ interface Ball {
 }
 
 export class Game {
-  onEvent: (e: SimEvent) => void;
+  onEvent: (e: SimEvent, contribs: ContribInput[]) => void;
   quarterLen: number;
   hoops: Vec[];
   teams: TeamRuntime[];
@@ -509,8 +510,11 @@ export class Game {
     const n = this.quarter - 4;
     return n > 1 ? "OT" + n : "OT";
   }
-  emit(type: SimEventType, text: string, team: number | null) {
-    this.onEvent({ type, text, team, qLabel: this.qLabel(), clock: fmtClock(this.gameClock) });
+  emit(type: SimEventType, text: string, team: number | null, contribs: ContribInput[] = []) {
+    this.onEvent(
+      { type, text, team, qLabel: this.qLabel(), clock: fmtClock(this.gameClock) },
+      contribs
+    );
   }
   scoreLine() {
     const [a, b] = this.teams;
@@ -629,7 +633,9 @@ export class Game {
       p.keyTime += dt;
       if (p.keyTime > 3) {
         p.stats.tov++;
-        this.emit("turnover", `Three seconds in the key on ${p.name} — turnover`, p.team);
+        this.emit("turnover", `Three seconds in the key on ${p.name} — turnover`, p.team, [
+          { playerId: p.id, team: p.team, kind: "turnover" },
+        ]);
         this.setupInbound(1 - off, this.oobSpot(p.pos), { sc: 24 });
         return true;
       }
@@ -1347,7 +1353,10 @@ export class Game {
       if (Math.random() < rate * dt) {
         near.p.stats.stl++;
         h.stats.tov++;
-        this.emit("steal", pick(LINES.steal)(near.p.name, h.name), near.p.team);
+        this.emit("steal", pick(LINES.steal)(near.p.name, h.name), near.p.team, [
+          { playerId: near.p.id, team: near.p.team, kind: "steal", relatedPlayerId: h.id },
+          { playerId: h.id, team: h.team, kind: "turnover", relatedPlayerId: near.p.id },
+        ]);
         this.gainPossession(near.p, { live: true });
         return;
       }
@@ -1886,7 +1895,11 @@ export class Game {
           this.emit(
             "steal",
             `${o.name} jumps the passing lane — stolen from ${passer.name}!`,
-            o.team
+            o.team,
+            [
+              { playerId: o.id, team: o.team, kind: "steal", relatedPlayerId: passer.id },
+              { playerId: passer.id, team: passer.team, kind: "turnover", relatedPlayerId: o.id },
+            ]
           );
           this.ball.flight = null;
           this.ball.air = 0;
@@ -1920,7 +1933,12 @@ export class Game {
       const out = f.to.x < 0 || f.to.x > COURT.W || f.to.y < 0 || f.to.y > COURT.H;
       if (out) {
         f.passer!.stats.tov++;
-        this.emit("turnover", `${f.passer!.name} fires it out of bounds — turnover`, f.passer!.team);
+        this.emit(
+          "turnover",
+          `${f.passer!.name} fires it out of bounds — turnover`,
+          f.passer!.team,
+          [{ playerId: f.passer!.id, team: f.passer!.team, kind: "turnover" }]
+        );
         this.setupInbound(1 - f.passer!.team, this.oobSpot(f.to), { sc: 24 });
       } else {
         this.emit("loose", `Errant pass from ${f.passer!.name} — ball is loose!`, f.passer!.team);
@@ -1956,7 +1974,15 @@ export class Game {
       if (f.passer) f.passer.allowOOB = false;
     } else if (f.passer) {
       const line = pick(PASS_LINES[f.passType || "chest"])(f.passer.name, f.catcher!.name);
-      this.emit("pass", line, f.passer.team);
+      this.emit("pass", line, f.passer.team, [
+        {
+          playerId: f.passer.id,
+          team: f.passer.team,
+          kind: "pass",
+          passType: f.passType,
+          relatedPlayerId: f.catcher!.id,
+        },
+      ]);
       if (f.passType === "handoff") {
         // the exchange acts like a screen: receiver turns the corner,
         // the handler rolls out of it
@@ -1987,7 +2013,10 @@ export class Game {
         h.stats.fga++;
         def.stats.blk++;
         h.driving = false;
-        this.emit("block", `${def.name} swats ${h.name}'s shot away!`, def.team);
+        this.emit("block", `${def.name} swats ${h.name}'s shot away!`, def.team, [
+          { playerId: def.id, team: def.team, kind: "block", relatedPlayerId: h.id },
+          { playerId: h.id, team: h.team, kind: "shot_miss", blocked: true, relatedPlayerId: def.id },
+        ]);
         // swatted ball flies away from the hoop
         const hoop = this.hoops[h.team];
         const away = Math.atan2(h.pos.y - hoop.y, h.pos.x - hoop.x) + rand(-1.1, 1.1);
@@ -2042,7 +2071,11 @@ export class Game {
       this.emit(
         "foul",
         `${def.name} fouls ${h.name} on the ${sv.type === "three" ? "three-point " : ""}shot — ${sv.pts} free throws`,
-        def.team
+        def.team,
+        [
+          { playerId: def.id, team: def.team, kind: "foul_committed", relatedPlayerId: h.id },
+          { playerId: h.id, team: h.team, kind: "foul_drawn", relatedPlayerId: def.id },
+        ]
       );
       this.startFreeThrows(h, sv.pts);
       return;
@@ -2107,9 +2140,34 @@ export class Game {
         (f.assist ? ` (${f.assist.name} with the assist)` : "") +
         this.coverageTag(f) +
         ` — ${this.scoreLine()}`;
-      this.emit(f.label === "dunk" ? "dunk" : "score", line, sh.team);
+      this.emit(f.label === "dunk" ? "dunk" : "score", line, sh.team, [
+        {
+          playerId: sh.id,
+          team: sh.team,
+          kind: "shot_make",
+          shotType: f.label as ShotType,
+          points: f.pts,
+          defDist: f.defD,
+          shotQuality: f.prob,
+          openness: f.defD != null ? opennessOf(f.defD) : undefined,
+          pullUp: f.pullUp,
+          relatedPlayerId: f.assist?.id,
+        },
+        ...(f.assist
+          ? [
+              {
+                playerId: f.assist.id,
+                team: f.assist.team,
+                kind: "assist" as const,
+                relatedPlayerId: sh.id,
+              },
+            ]
+          : []),
+      ]);
       if (f.andOne) {
-        this.emit("foul", `${sh.name} is fouled on the finish — and one!`, 1 - sh.team);
+        this.emit("foul", `${sh.name} is fouled on the finish — and one!`, 1 - sh.team, [
+          { playerId: sh.id, team: sh.team, kind: "foul_drawn" },
+        ]);
         this.startFreeThrows(sh, 1);
         return;
       }
@@ -2119,7 +2177,18 @@ export class Game {
       }
       this.setupInbound(1 - sh.team, this.baselineSpot(1 - sh.team), { sc: 24 });
     } else {
-      this.emit("miss", pick(LINES.miss[f.label!])(sh.name, f.d) + this.coverageTag(f), sh.team);
+      this.emit("miss", pick(LINES.miss[f.label!])(sh.name, f.d) + this.coverageTag(f), sh.team, [
+        {
+          playerId: sh.id,
+          team: sh.team,
+          kind: "shot_miss",
+          shotType: f.label as ShotType,
+          defDist: f.defD,
+          shotQuality: f.prob,
+          openness: f.defD != null ? opennessOf(f.defD) : undefined,
+          pullUp: f.pullUp,
+        },
+      ]);
       if (this.gameClock <= 0) {
         this.endQuarter();
         return;
@@ -2244,10 +2313,13 @@ export class Game {
         offBoard
           ? `${win!.name} crashes the glass — offensive rebound!`
           : `${win!.name} secures the defensive board`,
-        win!.team
+        win!.team,
+        [{ playerId: win!.id, team: win!.team, kind: offBoard ? "off_reb" : "def_reb" }]
       );
     } else {
-      this.emit("recover", `${win!.name} comes up with the loose ball`, win!.team);
+      this.emit("recover", `${win!.name} comes up with the loose ball`, win!.team, [
+        { playerId: win!.id, team: win!.team, kind: "recover" },
+      ]);
     }
     this.gainPossession(win!, { live: true });
     if (offBoard) this.shotClock = 14;
@@ -2273,7 +2345,11 @@ export class Game {
       "foul",
       `${def.name} reaches in on ${victim.name} — personal foul` +
         (bonus ? `, and the ${this.teams[victim.team].name} are in the bonus` : ""),
-      def.team
+      def.team,
+      [
+        { playerId: def.id, team: def.team, kind: "foul_committed", relatedPlayerId: victim.id },
+        { playerId: victim.id, team: victim.team, kind: "foul_drawn", relatedPlayerId: def.id },
+      ]
     );
     if (bonus) {
       this.startFreeThrows(victim, 2);
@@ -2387,10 +2463,13 @@ export class Game {
       this.emit(
         "freethrow",
         `${sh.name} makes the free throw${ordinal} — ${this.scoreLine()}`,
-        sh.team
+        sh.team,
+        [{ playerId: sh.id, team: sh.team, kind: "ft_make", shotType: "ft", points: 1 }]
       );
     } else {
-      this.emit("freethrow", `${sh.name} misses the free throw${ordinal}`, sh.team);
+      this.emit("freethrow", `${sh.name} misses the free throw${ordinal}`, sh.team, [
+        { playerId: sh.id, team: sh.team, kind: "ft_miss", shotType: "ft" },
+      ]);
     }
     if (ft && ft.remaining > 1) {
       ft.remaining--;
@@ -2558,8 +2637,14 @@ export class Game {
 
   shotClockViolation() {
     const t = this.possession;
-    if (this.ball.holder) this.ball.holder.stats.tov++;
-    this.emit("turnover", `Shot-clock violation on the ${this.teams[t].name}`, t);
+    const holder = this.ball.holder;
+    if (holder) holder.stats.tov++;
+    this.emit(
+      "turnover",
+      `Shot-clock violation on the ${this.teams[t].name}`,
+      t,
+      holder ? [{ playerId: holder.id, team: holder.team, kind: "turnover" }] : []
+    );
     this.setupInbound(1 - t, this.oobSpot(this.ball.pos), { sc: 24 });
   }
 

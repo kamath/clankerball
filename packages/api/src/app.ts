@@ -10,15 +10,15 @@ import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { swaggerUI } from "@hono/swagger-ui";
 import { cors } from "hono/cors";
 import {
-  BatchRunSchema,
   BuildMatchupInputSchema,
   GameConfigSchema,
   ReplaySchema,
   RosterPlayerSchema,
+  SimArtifactSchema,
   SimulateRequestSchema,
   TeamOptionSchema,
+  buildArtifact,
   simulatePossession,
-  summarizePossession,
 } from "@repo/shared";
 import { buildMatchup, listAllPlayers, listTeams } from "./lib/teams";
 
@@ -149,8 +149,8 @@ const simulateRoute = createRoute({
   responses: {
     200: {
       description:
-        "One outcome summary (result + points + play-by-play) per simulated possession, in order. Each run's frames (paths) are pullable from R2 via GET /simulate/{id}.",
-      content: { "application/json": { schema: z.array(BatchRunSchema) } },
+        "One normalized analytics artifact for the batch: the players, one feature row per possession, the flat event + contribution tables, and the config-level rollup. Each run's frames (paths) are pullable from R2 via GET /simulate/{id}.",
+      content: { "application/json": { schema: SimArtifactSchema } },
     },
     400: { description: "Invalid request (e.g. count above the batch cap)", ...jsonError },
     500: { description: "Simulation error", ...jsonError },
@@ -262,7 +262,6 @@ const routes = base
   .openapi(simulateRoute, async (c) => {
     const { count = 1, ...req } = c.req.valid("json");
     const bucket = c.env.SIMULATION_ARTIFACTS;
-    const offenseTeam = req.offense === 0 ? req.config.teamA.name : req.config.teamB.name;
 
     // The engine is pure CPU and random per run, so each possession is an
     // independent outcome. Mint a simId per run so its paths can be pulled back.
@@ -272,10 +271,10 @@ const routes = base
     }));
 
     // Write each run's full Replay (frames = the movement paths, plus the
-    // play-by-play) to R2 so GET /simulate/{id} can pull it back for playback.
-    // Awaited (best-effort per run) so the paths are available the instant the
-    // caller asks; a failed write just means that one run can't be replayed —
-    // its outcome + events are still returned below.
+    // play-by-play and contributions) to R2 so GET /simulate/{id} can pull it
+    // back for playback. Awaited (best-effort per run) so the paths are
+    // available the instant the caller asks; a failed write just means that one
+    // run can't be replayed — its analytics are still returned below.
     await Promise.all(
       runs.map(({ simId, replay }) =>
         putReplay(bucket, simId, replay).catch((err) =>
@@ -284,12 +283,17 @@ const routes = base
       )
     );
 
-    // Return one light summary per run: outcome + points + the full play-by-play.
-    const results = runs.map(({ simId, replay }) => {
-      const { result, points } = summarizePossession(req.offense, replay);
-      return { simId, result, points, offense: req.offense, offenseTeam, events: replay.events };
+    // Roll the batch into one normalized analytics artifact: players, per-
+    // possession feature rows, the flat event + contribution tables, and the
+    // config-level aggregate. Downstream (browser/CLI) queries it as tables.
+    const artifact = buildArtifact({
+      config: req.config,
+      offense: req.offense,
+      // no play identifier crosses the wire at this layer; presence-only for now.
+      plan: req.plan ? "custom" : null,
+      runs,
     });
-    return c.json(z.array(BatchRunSchema).parse(results), 200);
+    return c.json(SimArtifactSchema.parse(artifact), 200);
   })
   .openapi(savePlayRoute, async (c) => {
     const play = c.req.valid("json");

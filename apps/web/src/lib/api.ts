@@ -51,13 +51,14 @@ export async function fetchMatchup(input: BuildMatchupInput) {
 }
 
 /** Run a staged lab possession on the backend Worker `count` times (each run is
-    an independent random outcome); returns one summary per run — outcome, points,
-    and the full play-by-play. Each run's frames (paths) are pulled separately via
-    `fetchSimReplay` when a run is played back. */
+    an independent random outcome); returns one normalized analytics artifact for
+    the batch — players, per-possession feature rows, the flat event + contribution
+    tables, and the config-level aggregate. Each run's frames (paths) are pulled
+    separately via `fetchSimReplay` when a run is played back. */
 export async function fetchSimulation(input: SimulateRequest, count = 1) {
   const res = await api.api.simulate.$post({ json: { ...input, count } });
   if (!res.ok) throw await toError(res);
-  return res.json(); // inferred: BatchRun[]
+  return res.json(); // inferred: SimArtifact
 }
 
 /** Pull a simulated run's full Replay (its paths + play-by-play) back from R2 by

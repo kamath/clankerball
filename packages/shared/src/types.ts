@@ -196,6 +196,81 @@ export interface SimEvent {
   clock: string;
 }
 
+/** The kind of pass thrown — drives the play-by-play line and the passing-lane
+    steal odds. Authoritative here so both the engine and Contribution can use it. */
+export type PassType =
+  | "chest"
+  | "bounce"
+  | "skip"
+  | "lob"
+  | "entry"
+  | "outlet"
+  | "hitAhead"
+  | "pocket"
+  | "kickout"
+  | "noLook"
+  | "handoff";
+
+/** The shot's range bucket (mirrors the engine's shot `label`). */
+export type ShotType = "three" | "mid" | "inside" | "dunk" | "ft";
+
+/** How open the shot was, bucketed from the defender's distance at release
+    using the same thresholds as the play-by-play coverage tag. */
+export type Openness = "wide_open" | "open" | "contested" | "smothered";
+
+/** A single player's discrete contribution on one event. Every meaningful thing
+    a player does on a possession (took a shot, made a pass, grabbed a board,
+    forced a turnover…) is one row, foreign-keyed to the SimEvent it belongs to
+    by `eventIndex`. This is the normalized, queryable record of "who did what". */
+export type ContribKind =
+  | "shot_make"
+  | "shot_miss"
+  | "assist"
+  | "pass"
+  | "turnover"
+  | "steal"
+  | "block"
+  | "off_reb"
+  | "def_reb"
+  | "recover"
+  | "foul_committed"
+  | "foul_drawn"
+  | "ft_make"
+  | "ft_miss";
+
+export interface Contribution {
+  /** FK → the SimEvent's index within its possession's `events` array. */
+  eventIndex: number;
+  /** global player id = team * 5 + slot. */
+  playerId: number;
+  team: number;
+  kind: ContribKind;
+  // ----- payload: only the fields relevant to `kind` are populated -----
+  /** shot_make / shot_miss / assist context. */
+  shotType?: ShotType;
+  /** points booked on this contribution (a make or a made free throw). */
+  points?: number;
+  /** defender distance at the shot's release, in feet (openness signal). */
+  defDist?: number;
+  /** the engine's make-probability estimate at release (0–1) — "shot quality". */
+  shotQuality?: number;
+  /** bucketed `defDist`. */
+  openness?: Openness;
+  /** the shot was taken off the dribble, not a set catch-and-shoot. */
+  pullUp?: boolean;
+  /** the shot attempt was swatted. */
+  blocked?: boolean;
+  /** pass / assist: the kind of pass thrown. */
+  passType?: PassType;
+  /** the other player in the play: assister↔shooter, robbed passer↔thief,
+      fouler↔fouled — as a global player id. */
+  relatedPlayerId?: number;
+}
+
+/** What an engine emit site supplies for a contribution: everything but the FK,
+    which the recorder stamps from the event's position in the stream. */
+export type ContribInput = Omit<Contribution, "eventIndex">;
+
 export interface GameOpts {
-  onEvent?: (e: SimEvent) => void;
+  onEvent?: (e: SimEvent, contribs: ContribInput[]) => void;
 }

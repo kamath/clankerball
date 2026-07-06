@@ -11,6 +11,7 @@ import { PAD, Renderer, SCALE, type DrawScene, type OverlayGlyph } from "@/lib/r
 import { fetchSimReplay, fetchSimulation } from "@/lib/api";
 import type { PlanAction, TeamPlan } from "@repo/shared";
 import type {
+  Contribution,
   GameConfig,
   LabSetup,
   Player,
@@ -126,6 +127,7 @@ export function useGame(initialConfig: GameConfig) {
   const framesRef = useRef<ReplayFrame[]>([]);
   const metaRef = useRef<ReplayMeta | null>(null);
   const replayEventsRef = useRef<SimEvent[]>([]); // play-by-play of the recording
+  const replayContribsRef = useRef<Contribution[]>([]); // structured contributions, FK'd to events
   const hasReplayRef = useRef(false);
   // replay playback state (playback reuses playingRef/speedRef for pause/speed)
   const replayingRef = useRef(false);
@@ -665,6 +667,7 @@ export function useGame(initialConfig: GameConfig) {
       meta: metaRef.current,
       frames: framesRef.current,
       events: replayEventsRef.current,
+      contributions: replayContribsRef.current,
     };
     const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -832,6 +835,7 @@ export function useGame(initialConfig: GameConfig) {
       metaRef.current = rep.meta;
       framesRef.current = rep.frames;
       replayEventsRef.current = rep.events;
+      replayContribsRef.current = rep.contributions;
       const has = rep.frames.length > 0;
       hasReplayRef.current = has;
       setHasReplay(has);
@@ -861,12 +865,14 @@ export function useGame(initialConfig: GameConfig) {
         // R2. Time the batch round-trip so the UI can show how long it took, then
         // record every run and pull the first run's Replay back to play it.
         const started = performance.now();
-        const runs = await fetchSimulation(payload, count);
+        const artifact = await fetchSimulation(payload, count);
         setSimDurationMs(performance.now() - started);
+        // The batch now returns one normalized analytics artifact; the outcome
+        // list the UI shows is its per-possession feature rows.
         setSimOutcomes(
-          runs.map((r) => ({ simId: r.simId, result: r.result, points: r.points }))
+          artifact.possessions.map((r) => ({ simId: r.simId, result: r.result, points: r.points }))
         );
-        const first = runs[0];
+        const first = artifact.possessions[0];
         if (first) {
           setActiveSimId(first.simId);
           const rep = await fetchSimReplay(first.simId);

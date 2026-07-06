@@ -7,10 +7,11 @@
    engine; the assertions at the bottom keep the two in lockstep.
    ============================================================ */
 import { z } from "zod";
-import type { GameConfig, PlayerConfig, TeamConfig, Tendencies, Vec } from "./types";
+import type { Contribution, GameConfig, PlayerConfig, TeamConfig, Tendencies, Vec } from "./types";
 import type { TeamPlan } from "./plan";
 import type { LabSetup } from "./engine";
-import type { Replay, ReplayFrame, ReplayMeta, SimulateRequest } from "./replay";
+import type { PossessionSummary, Replay, ReplayFrame, ReplayMeta, SimulateRequest } from "./replay";
+import type { SimArtifact } from "./analytics";
 
 /* ---------- domain: teams, players, matchups ---------- */
 
@@ -235,10 +236,61 @@ export const SimEventSchema = z.object({
   clock: z.string(),
 });
 
+/* ---------- structured player contributions ---------- */
+
+export const shotTypeEnum = z.enum(["three", "mid", "inside", "dunk", "ft"]);
+export const opennessEnum = z.enum(["wide_open", "open", "contested", "smothered"]);
+export const passTypeEnum = z.enum([
+  "chest",
+  "bounce",
+  "skip",
+  "lob",
+  "entry",
+  "outlet",
+  "hitAhead",
+  "pocket",
+  "kickout",
+  "noLook",
+  "handoff",
+]);
+export const contribKindEnum = z.enum([
+  "shot_make",
+  "shot_miss",
+  "assist",
+  "pass",
+  "turnover",
+  "steal",
+  "block",
+  "off_reb",
+  "def_reb",
+  "recover",
+  "foul_committed",
+  "foul_drawn",
+  "ft_make",
+  "ft_miss",
+]);
+
+export const ContributionSchema = z.object({
+  eventIndex: z.number(),
+  playerId: z.number(),
+  team: z.number(),
+  kind: contribKindEnum,
+  shotType: shotTypeEnum.optional(),
+  points: z.number().optional(),
+  defDist: z.number().optional(),
+  shotQuality: z.number().optional(),
+  openness: opennessEnum.optional(),
+  pullUp: z.boolean().optional(),
+  blocked: z.boolean().optional(),
+  passType: passTypeEnum.optional(),
+  relatedPlayerId: z.number().optional(),
+});
+
 export const ReplaySchema = z.object({
   meta: ReplayMetaSchema,
   frames: z.array(ReplayFrameSchema),
   events: z.array(SimEventSchema),
+  contributions: z.array(ContributionSchema),
 });
 
 /* ---------- the matchup play library (backed by simulation analytics) ---------- */
@@ -291,6 +343,98 @@ export const BatchRunSchema = z.object({
 });
 export type BatchRun = z.infer<typeof BatchRunSchema>;
 
+/* ---------- batch analytics artifact ----------
+   One /simulate call returns this single normalized dataset: the ten players,
+   one feature row per possession, the flat event + contribution tables (joined
+   on (simId, eventIndex)), and the config-level rollup. Consumed as relational
+   tables by the browser or a CLI — no persistence involved. */
+
+export const simEventTypeEnum = z.enum([
+  "period",
+  "final",
+  "score",
+  "dunk",
+  "miss",
+  "block",
+  "steal",
+  "turnover",
+  "rebound",
+  "recover",
+  "loose",
+  "pass",
+  "foul",
+  "freethrow",
+  "info",
+]);
+
+export const ArtifactPlayerSchema = z.object({
+  id: z.number(),
+  team: z.number(),
+  slot: z.number(),
+  name: z.string(),
+  number: z.number(),
+  position: z.string(),
+  nbaId: z.number().optional(),
+});
+
+export const ArtifactEventSchema = SimEventSchema.extend({
+  simId: z.string(),
+  eventIndex: z.number(),
+});
+
+export const ArtifactContributionSchema = ContributionSchema.extend({
+  simId: z.string(),
+});
+
+export const PossessionSummarySchema = z.object({
+  offense: z.number(),
+  result: z.string(),
+  outcomeType: simEventTypeEnum,
+  points: z.number(),
+  assisted: z.boolean(),
+  passes: z.number(),
+  offReb: z.number(),
+  turnover: z.boolean(),
+  fgAttempted: z.boolean(),
+  fgMade: z.boolean(),
+  shotType: shotTypeEnum.optional(),
+  openness: opennessEnum.optional(),
+  shotQuality: z.number().optional(),
+});
+
+export const ArtifactPossessionSchema = PossessionSummarySchema.extend({
+  simId: z.string(),
+});
+
+export const BatchAggregateSchema = z.object({
+  n: z.number(),
+  pointsPerPossession: z.number(),
+  scoredPct: z.number(),
+  assistRate: z.number(),
+  turnoverRate: z.number(),
+  offRebRate: z.number(),
+  avgPasses: z.number(),
+  shotTypeMix: z.record(z.string(), z.number()),
+  opennessMix: z.record(z.string(), z.number()),
+  outcomeHistogram: z.record(z.string(), z.number()),
+});
+
+export const SimArtifactSchema = z.object({
+  config: z.object({
+    offense: z.number(),
+    offenseTeam: z.string(),
+    defenseTeam: z.string(),
+    n: z.number(),
+    plan: z.string().nullable().optional(),
+  }),
+  players: z.array(ArtifactPlayerSchema),
+  possessions: z.array(ArtifactPossessionSchema),
+  events: z.array(ArtifactEventSchema),
+  contributions: z.array(ArtifactContributionSchema),
+  aggregate: BatchAggregateSchema,
+});
+export type SimArtifactOut = z.infer<typeof SimArtifactSchema>;
+
 /* ---------- drift guards: schema inference must match the hand-written
    interfaces the engine relies on. These are compile-time only. ---------- */
 type Assert<T extends true> = T;
@@ -315,3 +459,9 @@ type _RM = Assert<Extends<z.infer<typeof ReplayMetaSchema>, ReplayMeta>>;
 type _RF = Assert<Extends<z.infer<typeof ReplayFrameSchema>, ReplayFrame>>;
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _RP = Assert<Extends<z.infer<typeof ReplaySchema>, Replay>>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _CO = Assert<Extends<z.infer<typeof ContributionSchema>, Contribution>>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _PS = Assert<Extends<z.infer<typeof PossessionSummarySchema>, PossessionSummary>>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _SA = Assert<Extends<z.infer<typeof SimArtifactSchema>, SimArtifact>>;

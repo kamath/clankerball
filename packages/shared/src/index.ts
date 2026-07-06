@@ -5,4 +5,5 @@ export * from "./plan";
 export * from "./schemas";
 export * from "./engine";
 export * from "./replay";
+export * from "./analytics";
 export * from "./hash";
