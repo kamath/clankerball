@@ -267,6 +267,8 @@ interface Flight {
   andOne?: boolean;
   /** this flight is a free-throw attempt */
   ft?: boolean;
+  /** jumper taken off the dribble, not a set catch-and-shoot */
+  pullUp?: boolean;
 }
 
 interface Loose {
@@ -1657,7 +1659,9 @@ export class Game {
        rim, contested ~60s              (NBA restricted area overall: ~65%)
        three, open    ~37% at 3pt 58    (NBA wide-open 3: ~38%)
        three, tight   ~high 20s         (NBA tight 3: ~30%)
-       mid, open      ~45% at mid 52    (NBA open mid: ~45%) */
+       mid, open      ~45% at mid 58 from 12 ft, ~43% from 18
+                      (NBA open mid ~45%, open long-2 ~42-44%);
+                      pull-ups off the dribble give back another 3 points */
   shotValue(p: Player, pos: Vec) {
     const hoop = this.hoops[p.team];
     const d = dist(pos, hoop);
@@ -1675,7 +1679,8 @@ export class Game {
       base = 0.17 + p.threePoint * 0.0034 - (d - 22) * 0.008; // deep = harder
     } else {
       type = "mid";
-      base = 0.28 + p.midRange * 0.0034 - (d - 5) * 0.005; // long 2s = worst shot
+      // open 18-footer ≈ 43% at rating 58 (NBA open long-2: ~42-44%)
+      base = 0.28 + p.midRange * 0.0034 - (d - 5) * 0.004;
     }
     const no = this.nearestOppTo(p.team, pos);
     let pen = 0;
@@ -2006,7 +2011,8 @@ export class Game {
       prob = clamp(0.72 + h.dunk * 0.0022 - (sv.defD < 2.5 ? 0.14 : 0), 0.05, 0.97);
     }
     if (forced) prob -= 0.06;
-    if (h.driving && sv.type !== "inside") prob -= 0.05;
+    const pullUp = h.driving && sv.type !== "inside";
+    if (pullUp) prob -= 0.03; // off the dribble beats a set catch-and-shoot look
     // shooting foul: tight contests draw whistles, most of all at the rim.
     // Undisciplined, gambling defenders hack more; a downhill driver gets
     // more calls than a stationary finisher.
@@ -2066,6 +2072,7 @@ export class Game {
       defName: def ? def.name.split(" ").slice(-1)[0] : null,
       prob,
       andOne: fouled && made,
+      pullUp,
     };
     this.ball.holder = null;
     this.shotClockActive = false;
@@ -2079,6 +2086,7 @@ export class Game {
     else if (f.defD! >= 4.5) cov = "open";
     else if (f.defD! >= 2.8) cov = `contested by ${f.defName}`;
     else cov = `smothered by ${f.defName}`;
+    if (f.pullUp) cov += " pull-up";
     return ` [${cov} · ${Math.round(f.prob! * 100)}% look]`;
   }
 

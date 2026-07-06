@@ -138,10 +138,13 @@ export function ratePlayer(
       ? map(z(s, "ft_pct") * 0.6 - 1.0, 42, 10) // non-shooter: touch only
       : map(z(s, "fg3_pct") * (0.5 + 0.5 * vol3) + vol3 * 0.4, 58, 14);
 
+  // no public shot-zone splits, so mid-range leans on the best proxies:
+  // FT% (pure touch) and scoring volume. 3P% only lightly — elite middy
+  // players (SGA, DeRozan types) are often mediocre from deep.
   const midRange = map(
-    z(s, "ft_pct") * 0.4 + z(s, "fg3_pct") * 0.35 + z(s, "fg_pct") * 0.25,
-    52,
-    14
+    z(s, "ft_pct") * 0.5 + z(s, "pts36") * 0.25 + z(s, "fg3_pct") * 0.15 + z(s, "fg_pct") * 0.1,
+    54,
+    15
   );
   const layup = map(z(s, "fg_pct") * 0.5 + z(s, "fta36") * 0.3, 58, 13) + Math.round(big * 4);
   const freeThrow = map(z(s, "ft_pct"), 58, 14);
