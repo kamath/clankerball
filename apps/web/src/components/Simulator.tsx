@@ -60,7 +60,6 @@ export function Simulator({
   const game = useGame(initialConfig);
   const { data: teams = [] } = useTeams();
   const { snapshot } = game;
-  const names = snapshot.teamMeta;
   // active sub-tab within the lab panel (teams + roster edit / designer)
   const [labTab, setLabTab] = useState("teams");
   // each team's full roster, so the editor can swap a starter for a teammate
@@ -350,22 +349,15 @@ export function Simulator({
           </Button>
         )}
         <h1 className="text-xl font-semibold">Clankerball</h1>
-        <span className="text-sm text-muted-foreground">
-          {isResults ? "Results" : "Play Lab"}
-        </span>
-        {names.length === 2 && (
-          <span className="ml-auto text-sm text-muted-foreground">
-            {names[0].name} vs {names[1].name}
-          </span>
-        )}
-        <div className={`flex items-center gap-2 ${names.length === 2 ? "" : "ml-auto"}`}>
+        {isResults && <span className="text-sm text-muted-foreground">Results</span>}
+        <div className="ml-auto flex items-center gap-2">
           <Button
             variant="outline"
             size="sm"
             className="gap-2"
             onClick={onShare}
             disabled={shareStatus === "saving"}
-            title="Save this play and copy a shareable link"
+            title="Save this simulation and copy a shareable link"
           >
             {shareStatus === "copied" ? (
               <Check data-icon="inline-start" />
@@ -376,7 +368,7 @@ export function Simulator({
               ? "Link copied"
               : shareStatus === "saving"
                 ? "Saving…"
-                : "Share play"}
+                : "Share simulation"}
           </Button>
         </div>
       </header>
